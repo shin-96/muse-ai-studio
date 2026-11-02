@@ -1,0 +1,464 @@
+/* Films from user-supplied references. Reuses the real FilmStudio pipeline. */
+(() => {
+  'use strict';
+  const saved = store.get('referenceFilmDraft', {}) || {};
+  const RF = {
+    meta: null, projects: [], detail: null, queue: null, current: store.get('referenceFilmCurrent', null),
+    creating: true, draft: saved, refs: Array.isArray(saved.reference_images) ? saved.reference_images : [],
+    uploadCount: 0, submitting: false, loading: false, timer: null, limit: 24, musicFile: null, error: '',
+  };
+  const MAX_REFS = 4;
+  const ROLES = [['character', 'Nhân vật'], ['location', 'Bối cảnh'], ['prop', 'Đạo cụ / sản phẩm'], ['style', 'Phong cách']];
+  const roleLabel = (r) => ROLES.find(([id]) => id === r)?.[1] || 'Nhân vật';
+  const field = (id) => document.getElementById(id);
+  const active = () => S.page === 'reference-film' && window.ReferenceWorkspaceMode !== 'scenes';
+  const draftRefs = () => RF.refs.filter((r) => r.file).map(({ file, name, url, role, label, description }) => ({ file, name, url, role, label, description }));
+  const safeProgress = (d) => d.status === 'done' ? 100 : Math.max(0, Math.min(100, Math.round(Number(d.progress) || 0)));
+  const opts = (items, cur) => (items || []).map((s) => `<option value="${esc(s.id)}" ${s.id === cur ? 'selected' : ''}>${esc(s.label)}</option>`).join('');
+  const segment = (id, entries, value) => `<div class="seg seg-sm" id="${id}" role="group">${entries.map(([key, label, icon]) => `<button type="button" data-rf-value="${esc(key)}" class="${key === value ? 'on' : ''}" aria-pressed="${key === value}">${icon ? ic(icon) : ''}${esc(label)}</button>`).join('')}</div>`;
+  const selected = (id, fallback) => field(id)?.querySelector('button.on')?.dataset.rfValue || fallback;
+  const frame = () => field('rfMain');
+  const phaseLabel = (p) => ({ waiting: 'Đang chờ', running: 'Đang chạy', done: 'Hoàn thành', error: 'Lỗi', stopped: 'Đã dừng', need_input: 'Cần thông tin' }[p] || p || 'Chưa chạy');
+
+  function collect() {
+    if (!field('rfIdea')) return { ...RF.draft };
+    return {
+      name: field('rfName').value.trim(), idea: field('rfIdea').value.trim(), input_mode: selected('rfInputMode', 'single'),
+      genre: field('rfGenre').value, minutes: Math.max(1, Math.min(30, Number(field('rfMinutes').value) || 2)),
+      lang: field('rfLang').value, accent: field('rfAccent').value || 'north', style: field('rfStyle').value,
+      style_text: field('rfStyleText').value.trim(), ratio: selected('rfRatio', '16:9'),
+      music_mode: selected('rfMusic', 'auto'), dub: selected('rfVoice', 'off') === 'on',
+      narrator: field('rfNarrator').checked, subtitles: field('rfSubtitles').checked, auto_fix: field('rfAutoFix').checked,
+      reference_mode: true, reference_images: draftRefs(),
+    };
+  }
+
+  function saveDraft() {
+    RF.draft = collect();
+    RF.draft.reference_images = draftRefs();
+    store.set('referenceFilmDraft', RF.draft);
+  }
+
+  function settingsFrom(draft) {
+    const { name, input_mode, ...settings } = draft;
+    return { ...settings, reference_mode: true, reference_images: draftRefs() };
+  }
+
+  function renderList() {
+    const list = field('rfList'); if (!list) return;
+    const referenceIds = new Set(RF.projects.map((p) => String(p.id)));
+    const items = (RF.queue?.items || []).filter((q) => referenceIds.has(String(q.sid)));
+    const counts = items.reduce((out, item) => { out[item.phase] = (out[item.phase] || 0) + 1; return out; }, {});
+    list.innerHTML = `<button type="button" class="sv-item ${RF.creating ? 'on' : ''}" data-rf-new>${ic('plus')}<b>Phim tham chiếu mới</b><small>Chọn ảnh của bạn &amp; nhập ý tưởng</small></button>
+      <button type="button" class="sv-item" data-rf-queue>${ic('list-ordered')}<b>Hàng chờ phim tham chiếu</b><small>${items.length ? `${counts.running || 0} đang chạy · ${counts.waiting || 0} chờ · ${counts.done || 0} xong` : 'Thêm nhiều ý tưởng để làm lần lượt'}${RF.queue?.paused ? ' · đang tạm dừng' : ''}</small></button>
+      <span class="rf-list-label">Dự án của bạn · ${RF.projects.length}</span>
+      ${RF.error ? `<div class="rf-list-status rf-list-error">${esc(RF.error)}</div>` : ''}
+      ${RF.projects.map((p) => `<button type="button" class="sv-item ${!RF.creating && String(p.id) === String(RF.current) ? 'on' : ''}" data-rf-project="${esc(p.id)}">
+        <b>${esc(p.title || p.name || 'Phim tham chiếu')}</b><small>${p.reference_count || p.reference_images?.length || p.settings?.reference_images?.length || ''} ảnh tham chiếu${p.shots ? ` · ${p.images || 0}/${p.shots} ảnh · ${p.clips || 0}/${p.shots} clip` : ` · ~${p.minutes || p.settings?.minutes || 2} phút`}</small>
+        <span class="sv-st st-${esc(p.status)}">${esc(FM_STATUS[p.status] || p.status || 'Mới tạo')}</span>${p.busy ? `<div class="bar"><i style="width:${safeProgress(p)}%"></i></div>` : ''}</button>`).join('')}
+      ${!RF.projects.length && !RF.error ? '<div class="rf-list-status">Phim tạo ở mục này sẽ được lưu tại đây. Bạn có thể đóng rồi mở lại để làm tiếp.</div>' : ''}`;
+  }
+
+  function workflowHtml() {
+    // Keep the description aligned with the established Film workflow.
+    const template = document.createElement('template');
+    template.innerHTML = fmCreateHtml();
+    return template.content.querySelector('.mk-steps')?.outerHTML || '';
+  }
+
+  function renderCreate() {
+    const meta = RF.meta || {}, d = RF.draft;
+    const styles = (meta.styles || []).map((s) => [s.id, s.label]);
+    frame().innerHTML = `<div class="card fm-create rf-create">
+      <div class="rf-intro">${ic('image')}<div><h2>Làm phim từ ảnh của bạn</h2><p>Đưa nhân vật, bối cảnh hoặc sản phẩm của bạn vào câu chuyện. Tên và mô tả ảnh định hướng kịch bản; ảnh gốc được đính kèm khi tạo hình và clip. Muse quay từng shot có thoại và dựng phim theo cài đặt bên dưới.</p></div></div>
+      <div class="rf-reference-box">
+        <h3 class="rf-section-title"><b>1</b>Ảnh tham chiếu <small id="rfRefCount">${RF.refs.length}/${MAX_REFS} ảnh</small></h3>
+        <input type="file" id="rfFiles" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" multiple hidden>
+        <div class="rf-drop" id="rfDrop" role="button" tabindex="0" aria-label="Chọn hoặc kéo thả ảnh tham chiếu">${ic('upload-cloud')}<div><strong>Kéo ảnh vào đây hoặc bấm để chọn</strong><p>PNG, JPG, JPEG, WebP · tối đa ${MAX_REFS} ảnh · mỗi ảnh tối đa 20 MB</p></div><span class="btn ghost sm">${ic('plus')}Chọn ảnh</span></div>
+        <div class="rf-upload-status" id="rfUploadStatus" role="status" aria-live="polite"></div>
+        <div class="rf-ref-grid" id="rfRefGrid"></div>
+        <div class="rf-note">${ic('info')}<span>Đặt tên đúng với nhân vật / bối cảnh trong ý tưởng để tool ghép ảnh chính xác. Các phim trong hàng chờ dùng chung bộ ảnh này.</span></div>
+        <div class="rf-actions" style="margin-top:10px"><button type="button" class="btn ghost xs" id="rfClearRefs" ${RF.refs.length ? '' : 'disabled'}>${ic('trash')}Bỏ tất cả ảnh</button></div>
+      </div>
+      <div>
+        <h3 class="rf-section-title"><b>2</b>Câu chuyện của bạn</h3>
+        ${segment('rfInputMode', [['single', 'Một phim', 'film'], ['batch', 'Nhiều ý tưởng', 'list-ordered']], d.input_mode || 'single')}
+        <label class="field" style="margin-top:12px"><span id="rfIdeaLabel">Ý tưởng phim <em>(nhân vật, bối cảnh, mâu thuẫn và kết thúc)</em></span><textarea class="input" id="rfIdea" rows="5" placeholder="Ví dụ: Nhân vật trong ảnh là Hà, một chủ tiệm hoa nhỏ. Một buổi sáng, cô nhận được bó hoa giống hệt bó hoa mẹ từng tặng mình…">${esc(d.idea || '')}</textarea></label>
+        <div class="rf-actions"><button type="button" class="btn ghost xs" id="rfImportIdeas">${ic('upload')}Nhập ý tưởng từ .txt</button><input type="file" id="rfIdeasFile" accept=".txt,text/plain" hidden><small class="hint" id="rfIdeaCount"></small></div>
+      </div>
+      <div class="rf-settings-box">
+        <h3 class="rf-section-title"><b>3</b>Cài đặt phim</h3>
+        <div class="fm-grid">
+          <label class="field"><span>Tên phim <em>(trống = Muse đặt)</em></span><input class="input" id="rfName" value="${esc(d.name || '')}" placeholder="Tên phim của bạn"></label>
+          <label class="field"><span>Thể loại</span><select class="input select" id="rfGenre"><option value="">Muse tự chọn theo ý tưởng</option>${opts(meta.genres, d.genre || '')}</select></label>
+          <label class="field"><span>Độ dài (phút)</span><input class="input" type="number" id="rfMinutes" min="1" max="30" step="1" value="${d.minutes || 2}"></label>
+          <label class="field"><span>Ngôn ngữ thoại</span><select class="input select" id="rfLang">${opts(meta.langs, d.lang || 'vi')}</select></label>
+          <label class="field" id="rfAccentField"><span>Giọng vùng <em>(cả phim)</em></span><select class="input select" id="rfAccent">${opts(meta.accents, d.accent || 'north')}</select></label>
+          <label class="field"><span>Phong cách hình ảnh</span><select class="input select" id="rfStyle">${styles.map(([id, label]) => `<option value="${esc(id)}" ${id === (d.style || 'co_trang') ? 'selected' : ''}>${esc(label)}</option>`).join('')}<option value="custom" ${d.style === 'custom' ? 'selected' : ''}>Tự viết phong cách…</option></select></label>
+          <label class="field rf-span-two"><span id="rfStyleTextLabel">Yêu cầu thêm về hình <em>(tuỳ chọn)</em></span><input class="input" id="rfStyleText" value="${esc(d.style_text || '')}" placeholder="Ví dụ: ánh sáng xanh – vàng, trang phục hiện đại, giữ tóc và khuôn mặt theo ảnh"></label>
+        </div>
+        <div class="fm-grid wide" style="margin-top:14px">
+          <div class="field"><span>Tỷ lệ khung hình</span>${segment('rfRatio', [['16:9', '16:9 YouTube'], ['9:16', '9:16 Shorts'], ['1:1', '1:1']], d.ratio || '16:9')}</div>
+          <div class="field"><span>Nhạc nền</span>${segment('rfMusic', [['auto', 'Muse tạo', 'sparkles'], ['upload', 'File của tôi', 'upload'], ['none', 'Không nhạc', 'x']], d.music_mode || 'auto')}<div class="rf-upload-music" id="rfMusicUpload" hidden><label class="btn ghost xs">${ic('music')}Chọn file nhạc<input type="file" id="rfMusicFile" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,audio/*" hidden></label><small class="hint" id="rfMusicName">${esc(RF.musicFile?.name || 'Chưa chọn file')}</small><audio id="rfMusicPreview" controls hidden></audio></div></div>
+          <div class="field rf-span-two"><span>Giọng nhân vật</span>${segment('rfVoice', [['off', 'Giọng gốc Muse', 'film'], ['on', 'Lồng tiếng VoiceTube', 'mic']], d.dub ? 'on' : 'off')}<div class="rf-extra-voice" id="rfVoiceKey" hidden></div></div>
+        </div>
+        <div class="sv-row" style="margin-top:14px">
+          <label class="chk"><input type="checkbox" id="rfNarrator" ${d.narrator ? 'checked' : ''}><span>Có người dẫn chuyện (lời dẫn ở toàn cảnh)</span></label>
+          <label class="chk"><input type="checkbox" id="rfSubtitles" ${d.subtitles !== false ? 'checked' : ''}><span>Chèn phụ đề</span></label>
+          <label class="chk"><input type="checkbox" id="rfAutoFix" ${d.auto_fix !== false ? 'checked' : ''}><span>Tự sửa cảnh bị từ chối &amp; tạo lại</span></label>
+        </div>
+      </div>
+      <div class="fm-est" id="rfEstimate"></div>
+      <div class="rf-actions"><button type="button" class="btn primary-alt" id="rfGo">${ic('play')}Làm phim tự động</button><button type="button" class="btn ghost" id="rfCreateOnly">${ic('plus')}Tạo dự án, chạy từng bước</button><button type="button" class="btn ghost" id="rfBulk">${ic('list-plus')}Thêm nhiều phim vào hàng chờ…</button></div>
+      <div id="rfCreateError" role="alert" hidden></div>
+      <details class="rf-workflow"><summary>Quy trình làm phim: kịch bản → ảnh → clip thoại → dựng phim</summary>${workflowHtml()}</details>
+    </div>`;
+    renderRefs(); refreshControls(); refreshVoice();
+    vtEnsure(refreshVoice);
+    bindDrop();
+  }
+
+  function renderRefs() {
+    const grid = field('rfRefGrid'); if (!grid) return;
+    grid.innerHTML = RF.refs.map((r, index) => `<div class="rf-ref-card ${r.file ? '' : 'uploading'}" data-rf-ref="${index}"><div class="rf-ref-image"><img src="${esc(r.local || r.url || '')}" alt="Ảnh tham chiếu ${index + 1}"><span class="rf-ref-number">Ảnh ${index + 1}</span><button type="button" class="icon-btn" data-rf-remove="${index}" title="Bỏ ảnh ${index + 1}" aria-label="Bỏ ảnh ${index + 1}">${ic('x')}</button></div><div class="rf-ref-info"><label>Vai trò<select class="input select" data-rf-prop="role">${ROLES.map(([id, label]) => `<option value="${id}" ${id === (r.role || 'character') ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></label><label>Tên trong phim<input class="input" data-rf-prop="label" value="${esc(r.label || '')}" placeholder="Ví dụ: Hà, cửa tiệm hoa"></label><label>Mô tả cần giữ<textarea class="input" rows="2" data-rf-prop="description" placeholder="Ví dụ: giữ khuôn mặt, tóc, trang phục">${esc(r.description || '')}</textarea></label><span class="rf-ref-file" title="${esc(r.name || '')}">${r.file ? esc(r.name || '') : 'Đang tải ảnh lên…'}</span></div></div>`).join('');
+    field('rfRefCount').textContent = `${RF.refs.length}/${MAX_REFS} ảnh`;
+    field('rfClearRefs').disabled = !RF.refs.length || RF.submitting;
+    field('rfUploadStatus').textContent = RF.uploadCount ? `Đang tải ${RF.uploadCount} ảnh…` : RF.refs.length ? 'Ảnh đã sẵn sàng. Bạn có thể đổi vai trò và tên bên dưới.' : 'Chọn ít nhất 1 ảnh để tạo phim.';
+    refreshControls();
+  }
+
+  function refreshVoice() {
+    const box = field('rfVoiceKey'); if (!box) return;
+    box.hidden = selected('rfVoice', 'off') !== 'on';
+    if (box.hidden) return;
+    if (box.contains(document.activeElement)) return;
+    const status = S.vt;
+    box.innerHTML = !status || status.pending ? '<small class="hint">Đang kiểm tra VoiceTube…</small>' : status.has_key ? `<small class="hint vt-ok">${ic('check')}API key VoiceTube ${esc(status.masked || '')}${status.credits != null ? ` · ${Number(status.credits).toLocaleString('vi-VN')} credit` : ''}${status.error ? ` · ${esc(status.error)}` : ''}</small>` : `<div class="vt-inline"><input class="input xs" type="password" id="rfVtKey" autocomplete="off" placeholder="Dán API key VoiceTube"><button type="button" class="btn xs" id="rfVtSave">${ic('key')}Lưu key</button></div><small class="hint">Dùng API key VoiceTube của bạn. Key được lưu trên máy này.</small>`;
+  }
+
+  function refreshControls() {
+    if (!field('rfIdea')) return;
+    const batch = selected('rfInputMode', 'single') === 'batch';
+    const ideas = field('rfIdea').value.split(/\r?\n/).map((v) => v.trim()).filter(Boolean);
+    field('rfIdeaLabel').innerHTML = batch ? 'Danh sách ý tưởng <em>(mỗi dòng 1 phim · tối đa 50 phim)</em>' : 'Ý tưởng phim <em>(nhân vật, bối cảnh, mâu thuẫn và kết thúc)</em>';
+    field('rfIdeaCount').textContent = batch ? `${ideas.length}/50 ý tưởng · dùng chung ảnh & cài đặt` : 'Một ý tưởng có thể viết nhiều dòng';
+    const busy = RF.submitting || RF.uploadCount > 0;
+    frame().querySelectorAll('input,textarea,select,[data-rf-value],[data-rf-remove],#rfImportIdeas').forEach((control) => { control.disabled = RF.submitting; });
+    field('rfGo').innerHTML = ic(RF.submitting ? 'clock' : batch ? 'list-plus' : 'play') + (RF.submitting ? 'Đang tạo dự án…' : batch ? 'Thêm vào hàng chờ' : 'Làm phim tự động');
+    field('rfGo').disabled = busy;
+    field('rfBulk').disabled = busy;
+    field('rfCreateOnly').disabled = busy || batch;
+    field('rfCreateOnly').title = batch ? 'Chọn Một phim để tạo dự án và chạy từng bước' : 'Tạo dự án rồi kiểm tra kịch bản, ảnh và clip trước khi dựng';
+    field('rfMusicUpload').hidden = selected('rfMusic', 'auto') !== 'upload';
+    if (RF.musicFile?.local && !field('rfMusicPreview').getAttribute('src')) { field('rfMusicPreview').src = RF.musicFile.local; field('rfMusicPreview').hidden = false; }
+    field('rfName').disabled = batch || RF.submitting;
+    field('rfName').placeholder = batch ? 'Muse đặt tên riêng cho từng phim' : 'Tên phim của bạn';
+    field('rfAccentField').hidden = field('rfLang').value !== 'vi';
+    field('rfStyleTextLabel').innerHTML = field('rfStyle').value === 'custom' ? 'Mô tả phong cách hình ảnh <em>(bắt buộc với phong cách tự viết)</em>' : 'Yêu cầu thêm về hình <em>(tuỳ chọn)</em>';
+    const shots = fmScenes(field('rfMinutes').value), acts = fmActs(field('rfMinutes').value);
+    field('rfEstimate').innerHTML = `${ic('info')}<span>Ước tính ${acts} · ~${shots} shot · ~${shots} ảnh + ${shots} clip${selected('rfMusic', 'auto') === 'auto' ? ' + 1 bản nhạc' : ''}. Dựng gọn khoảng 4–5 giây/shot. Tool kiểm tra lời thoại, có thể tạo lại clip lỗi tối đa 3 lần. Thời gian thực tế phụ thuộc Muse và số tài khoản / luồng đang chạy.</span>`;
+  }
+
+  function bindDrop() {
+    const zone = field('rfDrop'); if (!zone) return;
+    zone.addEventListener('click', () => { if (!RF.submitting) field('rfFiles').click(); });
+    zone.addEventListener('keydown', (event) => { if (['Enter', ' '].includes(event.key)) { event.preventDefault(); if (!RF.submitting) field('rfFiles').click(); } });
+    ['dragenter', 'dragover'].forEach((name) => zone.addEventListener(name, (event) => { event.preventDefault(); zone.classList.add('dragover'); }));
+    zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+    zone.addEventListener('drop', (event) => { event.preventDefault(); zone.classList.remove('dragover'); if (!RF.submitting) addFiles(event.dataTransfer.files); });
+  }
+
+  async function addFiles(files) {
+    const valid = [...files].filter((f) => /\.(png|jpe?g|webp)$/i.test(f.name));
+    if (!valid.length) return toast('Chọn ảnh PNG, JPG, JPEG hoặc WebP', 'warn');
+    const free = MAX_REFS - RF.refs.length;
+    if (free <= 0) return toast(`Tối đa ${MAX_REFS} ảnh tham chiếu. Bỏ một ảnh trước khi thêm.`, 'warn');
+    if (valid.length > free) toast(`Đã chọn ${valid.length} ảnh; chỉ thêm ${free} ảnh còn chỗ.`, 'warn');
+    saveDraft();
+    for (const file of valid.slice(0, free)) {
+      if (RF.refs.length >= MAX_REFS) break;
+      if (file.size > 20 * 1024 * 1024) { toast(`${file.name}: ảnh vượt quá 20 MB`, 'error'); continue; }
+      const ref = { file: '', name: file.name, local: URL.createObjectURL(file), role: 'character', label: file.name.replace(/\.[^.]+$/, '').replace(/[_-]/g, ' '), description: '' };
+      RF.refs.push(ref); RF.uploadCount++; renderRefs();
+      try {
+        const result = await api('POST', '/api/refs?name=' + encodeURIComponent(file.name), undefined, file);
+        if (RF.refs.some((r) => r !== ref && r.file === result.file)) throw new Error('Ảnh này đã có trong bộ tham chiếu');
+        Object.assign(ref, { file: result.file, name: result.name || file.name, url: result.url });
+        if (ref.local) { URL.revokeObjectURL(ref.local); delete ref.local; }
+      } catch (error) {
+        RF.refs = RF.refs.filter((r) => r !== ref); URL.revokeObjectURL(ref.local);
+        toast(`${file.name}: ${error.message}`, 'error', 6000);
+      } finally { RF.uploadCount--; saveDraft(); renderRefs(); }
+    }
+  }
+
+  function renderDetail() {
+    const d = RF.detail; if (!d || RF.creating) return;
+    const s = d.settings || {}, refs = s.reference_images || d.reference_images || [];
+    const hasShots = (d.shot_list || []).length > 0 || d.shots > 0, busy = !!d.busy;
+    const action = (value, label, icon, enabled = true) => `<button type="button" class="btn ghost sm" data-rf-run="${value}" ${busy || !enabled ? 'disabled' : ''}>${ic(icon)}${label}</button>`;
+    const metaLabel = (key, value) => RF.meta?.[key]?.find((item) => item.id === value)?.label || value;
+    frame().innerHTML = `<div class="rf-detail">
+      <div class="card"><div class="rf-detail-head"><div><h2>${esc(d.title || d.name || 'Phim tham chiếu')}</h2><p>${refs.length} ảnh tham chiếu · ~${s.minutes || 2} phút · ${d.shots || d.shot_list?.length || 0} shot · ${d.images || 0} ảnh · ${d.clips || 0} clip</p></div><span class="sv-st st-${esc(d.status)}">${esc(FM_STATUS[d.status] || d.status || 'Mới tạo')}</span></div>
+        <div class="rf-status-message" role="status">${esc(d.message || (busy ? 'Tool đang thực hiện tác vụ…' : hasShots ? 'Đã có kịch bản. Chọn bước tiếp theo hoặc chạy tiếp tự động.' : 'Dự án đã lưu. Bắt đầu viết kịch bản khi bạn sẵn sàng.'))}</div>
+        <div class="rf-progress-caption"><span>Tiến trình do tool ghi nhận</span><b>${safeProgress(d)}%</b></div><div class="bar" role="progressbar" aria-label="Tiến trình phim" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${safeProgress(d)}"><i style="width:${safeProgress(d)}%"></i></div>
+        <div class="rf-detail-controls"><button type="button" class="btn primary-alt sm" data-rf-run="${hasShots ? 'continue' : 'all'}" ${busy ? 'disabled' : ''}>${ic('play')}${hasShots ? 'Chạy tiếp tự động' : 'Làm phim tự động'}</button>${busy ? `<button type="button" class="btn danger sm" id="rfStop">${ic('square')}Dừng</button>` : ''}<button type="button" class="btn ghost sm" id="rfAdvanced">${ic('pencil')}Chỉnh kịch bản, nhân vật &amp; cảnh</button>${d.video_url ? `<a class="btn sm" href="${esc(d.video_url)}" download>${ic('download')}Tải phim</a>` : ''}${hasShots ? `<a class="btn ghost sm" href="/api/film/${encodeURIComponent(d.id)}/srt" download>${ic('captions')}Tải SRT</a>` : ''}<button type="button" class="btn ghost sm" id="rfDelete" title="Xoá dự án, giữ file kết quả" ${busy ? 'disabled' : ''}>${ic('trash')}</button></div>
+        <div class="rf-detail-controls">${action('script', '1 · Kịch bản', 'sparkles', !d.images)}${s.music_mode === 'auto' ? action('music', '2 · Nhạc nền', 'music') : ''}${action('refs', '3 · Ảnh nhân vật', 'users', hasShots)}${action('images', '4 · Ảnh cảnh', 'images', hasShots)}${action('clips', '5 · Clip thoại', 'video', d.images > 0)}${s.dub ? action('dub', '6 · Lồng tiếng', 'mic', d.clips > 0) : ''}${action('render', 'Dựng phim', 'film', d.images > 0)}</div>
+        ${RF.error ? `<p class="rf-error">${esc(RF.error)}</p>` : ''}${d.video_url ? `<video class="rf-output-video" controls preload="metadata" src="${esc(d.video_url)}"></video>` : ''}
+      </div>
+      <div class="rf-detail-info"><div class="card"><h3>${ic('sparkles')}Ý tưởng &amp; cài đặt</h3><p>${esc(s.idea || d.summary_text || '')}</p><div class="rf-setting-pills">${[metaLabel('genres', s.genre) || 'Muse chọn thể loại', metaLabel('langs', s.lang), s.lang === 'vi' ? metaLabel('accents', s.accent) : '', metaLabel('styles', s.style), s.ratio, s.music_mode === 'none' ? 'Không nhạc' : s.music_mode === 'upload' ? 'Nhạc của tôi' : 'Nhạc Muse', s.dub ? 'VoiceTube' : 'Giọng Muse', s.subtitles ? 'Có phụ đề' : '', s.narrator ? 'Có người dẫn chuyện' : '', s.auto_fix ? 'Tự sửa cảnh lỗi' : ''].filter(Boolean).map((v) => `<span>${esc(v)}</span>`).join('')}</div>${s.style_text ? `<p style="margin-top:12px">${esc(s.style_text)}</p>` : ''}${d.music_url ? `<audio controls style="width:100%;margin-top:13px" src="${esc(d.music_url)}"></audio>` : ''}</div>
+      <div class="card"><h3>${ic('images')}Ảnh gốc của dự án</h3><div class="rf-detail-refs">${refs.map((r) => `<figure class="rf-detail-ref">${r.url ? `<a href="${esc(r.url)}" target="_blank" rel="noopener"><img src="${esc(r.url)}" alt="${esc(r.label || r.name || 'Ảnh tham chiếu')}"></a>` : `<span class="hint">${esc(r.name || r.file)}</span>`}<figcaption>${esc(r.label || r.name || '')}<br>${esc(roleLabel(r.role))}</figcaption></figure>`).join('') || '<p class="hint">Ảnh được lưu cùng cài đặt dự án.</p>'}</div></div></div>
+      ${(d.characters || []).length ? `<div class="card"><h3 class="rf-section-title">${ic('users')}Nhân vật &amp; giọng nói</h3><div class="rf-cast">${d.characters.map((c) => `<div class="rf-character">${c.ref_url ? `<img src="${esc(c.ref_url)}" alt="${esc(c.name)}" loading="lazy">` : ic('user')}<div><b>${esc(c.name)}</b><small>${esc(typeof c.voice === 'string' ? c.voice : c.gender || '')}</small></div></div>`).join('')}</div></div>` : ''}
+      <div class="card"><div class="rf-shot-head"><h3>${ic('clapper')}Cảnh &amp; clip đã tạo</h3></div><div class="rf-shots">${(d.shot_list || []).slice(0, RF.limit).map((shot) => `<article class="rf-shot"><div class="rf-shot-media">${shot.clip_url ? `<video controls preload="none" poster="${esc(shot.image_url || '')}" src="${esc(shot.clip_url)}"></video>` : shot.image_url ? `<img src="${esc(shot.image_url)}" alt="Shot ${esc(shot.id)}" loading="lazy">` : ic('image')}</div><div class="rf-shot-body"><header><b>Shot ${esc(shot.id)}</b><span>${esc(FM_TYPE[shot.type]?.[0] || shot.type || '')}</span></header><p>${esc((shot.lines || []).map((line) => line.text).join(' ') || shot.scene || '')}</p><small>${shot.clip_url ? 'Có clip' : shot.image_url ? 'Có ảnh · chưa có clip' : ['running', 'queued'].includes(shot.task_status) ? 'Đang tạo ảnh' : 'Chưa có ảnh'}${shot.stale ? ' · lời thoại đã thay đổi' : ''}</small>${shot.error || shot.clip_error ? `<div class="rf-error">${esc(shot.error || shot.clip_error)}</div>` : ''}</div></article>`).join('') || '<p class="hint">Chạy bước Kịch bản để tạo danh sách cảnh. Tại đây sẽ hiện ảnh và clip thật của từng shot.</p>'}</div>${(d.shot_list || []).length > RF.limit ? '<button type="button" class="btn ghost sm" id="rfMore" style="margin-top:14px">Xem thêm cảnh</button>' : ''}</div>
+    </div>`;
+  }
+
+  async function refresh(quiet = false) {
+    if (RF.loading) return;
+    RF.loading = true;
+    try {
+      const data = await api('GET', '/api/reference-film');
+      RF.meta = data; RF.projects = data.projects || []; RF.error = '';
+      try { RF.queue = await api('GET', '/api/queue/film'); } catch { /* main workspace still works without queue */ }
+      if (RF.current && !RF.projects.some((p) => String(p.id) === String(RF.current))) { RF.current = null; RF.detail = null; RF.creating = true; }
+      if (!quiet && !RF.current && RF.projects.length && !field('rfIdea')) { RF.current = RF.projects[0].id; RF.creating = false; }
+      renderList();
+      if (!RF.creating && RF.current) {
+        const requestedId = RF.current;
+        const detail = await api('GET', `/api/film/${encodeURIComponent(requestedId)}`);
+        if (RF.creating || String(RF.current) !== String(requestedId)) return;
+        RF.detail = detail;
+        // Avoid interrupting a clip the user is watching with periodic DOM replacement.
+        const playing = [...frame().querySelectorAll('video,audio')].some((media) => !media.paused);
+        if (!quiet || !playing) renderDetail();
+      } else if (!field('rfIdea')) renderCreate();
+    } catch (error) {
+      RF.error = error.message; renderList();
+      if (!quiet) toast('Không tải được phim tham chiếu: ' + error.message, 'error', 6000);
+      if (!RF.meta) frame().innerHTML = `<div class="card rf-create"><h2>Chưa tải được dữ liệu</h2><p class="hint">${esc(error.message)}</p><button type="button" class="btn ghost" data-rf-reload>${ic('refresh')}Thử lại</button></div>`;
+      else if (!RF.creating) renderDetail();
+    } finally { RF.loading = false; }
+  }
+
+  function scheduleRefresh() {
+    clearTimeout(RF.timer);
+    RF.timer = setTimeout(async () => { if (!active()) return; await refresh(true); scheduleRefresh(); }, 5000);
+  }
+
+  async function open() {
+    if (RF.current && !RF.detail && !field('rfIdea')) RF.creating = false;
+    if (!frame().children.length) frame().innerHTML = '<div class="card rf-create"><p class="hint">Đang tải phim tham chiếu…</p></div>';
+    await refresh(); scheduleRefresh();
+  }
+
+  function newProject() {
+    if (RF.submitting) return toast('Đợi lưu xong dự án hiện tại trước khi tạo phim mới', 'info');
+    if (RF.creating) saveDraft();
+    RF.creating = true; RF.current = null; RF.detail = null; RF.error = '';
+    store.set('referenceFilmCurrent', null); renderList();
+    if (RF.meta) renderCreate(); else refresh();
+  }
+
+  async function selectProject(id) {
+    if (RF.creating) saveDraft();
+    RF.current = id; RF.creating = false; RF.limit = 24; RF.error = '';
+    store.set('referenceFilmCurrent', id); renderList();
+    try {
+      const detail = await api('GET', `/api/film/${encodeURIComponent(id)}`);
+      if (RF.creating || String(RF.current) !== String(id)) return;
+      RF.detail = detail; renderDetail();
+    }
+    catch (error) { toast(error.message, 'error', 6000); }
+  }
+
+  function validate(draft, ideas) {
+    if (RF.uploadCount) throw new Error('Đợi tải xong ảnh trước khi tạo phim.');
+    if (!RF.refs.some((r) => r.file)) { field('rfDrop')?.focus(); throw new Error('Chọn ít nhất 1 ảnh tham chiếu.'); }
+    if (ideas.length > 50) throw new Error('Tối đa 50 ý tưởng mỗi lần. Chia danh sách thành nhiều lượt.');
+    if (!ideas.length || ideas.some((idea) => idea.length < 10)) { field('rfIdea')?.focus(); throw new Error('Mỗi ý tưởng cần ít nhất 10 ký tự. Mô tả nhân vật, bối cảnh và câu chuyện.'); }
+    if (draft.style === 'custom' && !draft.style_text) { field('rfStyleText')?.focus(); throw new Error('Nhập mô tả phong cách hình ảnh bạn muốn.'); }
+    if (draft.dub && !S.vt?.has_key) { field('rfVtKey')?.focus(); throw new Error('Lưu API key VoiceTube trước khi dùng tính năng lồng tiếng.'); }
+    if (draft.music_mode === 'upload' && !RF.musicFile) throw new Error('Chọn file nhạc nền của bạn trước khi tạo phim.');
+  }
+
+  function showCreateError(message) {
+    const box = field('rfCreateError'); if (!box) return;
+    box.hidden = !message; box.className = message ? 'rf-error' : ''; box.textContent = message || '';
+  }
+
+  async function create(run, queuedIdeas = null) {
+    if (RF.submitting) return;
+    saveDraft();
+    const draft = collect(), batch = queuedIdeas || (draft.input_mode === 'batch' ? draft.idea.split(/\r?\n/).map((v) => v.trim()).filter(Boolean) : null);
+    const ideas = batch || [draft.idea];
+    try { validate(draft, ideas); } catch (error) { showCreateError(error.message); toast(error.message, 'warn', 5000); return; }
+    RF.submitting = true; showCreateError(''); refreshControls();
+    let createdIds = [];
+    try {
+      const settings = settingsFrom(draft);
+      let result;
+      if (batch) {
+        delete settings.idea;
+        result = await api('POST', '/api/reference-film/bulk', { ideas, settings, ...(draft.music_mode === 'upload' ? { enqueue: false } : {}) });
+        createdIds = (result.created || []).map((item) => typeof item === 'object' ? item.id : item);
+        RF.current = createdIds[0] || null;
+        if (draft.music_mode === 'upload') {
+          // Keep jobs out of the queue until every project owns its music file.
+          for (let index = 0; index < createdIds.length; index++) {
+            if (field('rfGo')) field('rfGo').textContent = `Đang gắn nhạc ${index + 1}/${createdIds.length}…`;
+            await api('POST', `/api/film/${encodeURIComponent(createdIds[index])}/audio?name=${encodeURIComponent(RF.musicFile.name)}`, undefined, RF.musicFile);
+          }
+          result.queue = await api('POST', '/api/queue/film', { action: 'add', sids: createdIds });
+        }
+        RF.queue = result.queue || RF.queue;
+        toast(`Đã thêm ${createdIds.length} phim tham chiếu vào hàng chờ${RF.queue?.paused ? ' · hàng chờ đang tạm dừng' : ''}`, 'success', 5000);
+      } else {
+        result = await api('POST', '/api/reference-film', { name: draft.name, settings });
+        RF.current = result.id; RF.detail = result; createdIds = [result.id];
+        if (draft.music_mode === 'upload') await api('POST', `/api/film/${encodeURIComponent(result.id)}/audio?name=${encodeURIComponent(RF.musicFile.name)}`, undefined, RF.musicFile);
+        if (run) await api('POST', `/api/film/${encodeURIComponent(result.id)}/run`, { action: 'all' });
+        toast(run ? 'Đã bắt đầu làm phim từ ảnh tham chiếu' : 'Đã tạo dự án. Bạn có thể chạy và kiểm tra từng bước.', 'success', 5000);
+      }
+      RF.creating = false; RF.draft = { ...draft, name: '', idea: '', reference_images: draftRefs() };
+      store.set('referenceFilmDraft', RF.draft); store.set('referenceFilmCurrent', RF.current);
+      await refresh();
+    } catch (error) {
+      // If a project was created before a later action failed, keep its ID accessible.
+      if (createdIds.length) {
+        RF.creating = false; store.set('referenceFilmCurrent', RF.current);
+        toast(`Đã lưu ${createdIds.length} dự án${batch && draft.music_mode === 'upload' ? ', chưa thêm vào hàng chờ' : ''}. ${error.message}`, 'error', 8000);
+        await refresh(true); RF.error = error.message; renderDetail();
+      }
+      else { showCreateError(error.message); toast(error.message, 'error', 7000); }
+    } finally { RF.submitting = false; refreshControls(); }
+  }
+
+  function bulkDialog() {
+    saveDraft();
+    const initial = selected('rfInputMode', 'single') === 'batch' ? field('rfIdea').value : '';
+    openModal({ title: 'Thêm phim từ ảnh tham chiếu vào hàng chờ', icon: 'list-plus', wide: true,
+      body: `<label class="field"><span>Mỗi dòng 1 ý tưởng phim <em>(tối đa 50)</em></span><textarea class="input" id="rfBulkIdeas" rows="9" placeholder="Một câu chuyện về nhân vật trong ảnh…&#10;Một hành trình khác của cùng nhân vật…">${esc(initial)}</textarea></label><p class="hint">Mọi phim dùng ${RF.refs.filter((r) => r.file).length} ảnh tham chiếu và toàn bộ cài đặt bạn vừa chọn. Tool lưu dự án rồi chạy theo hàng chờ.</p>`,
+      foot: [{ label: 'Huỷ', cls: 'ghost' }, { label: 'Thêm vào hàng chờ', cls: 'primary-alt', icon: 'list-plus', onClick: async (el) => {
+        const ideas = el.querySelector('#rfBulkIdeas').value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+        try { validate(collect(), ideas); } catch (error) { toast(error.message, 'warn', 5000); return false; }
+        await create(true, ideas);
+      } }],
+    });
+  }
+
+  async function runAction(action) {
+    if (!RF.current || RF.detail?.busy) return;
+    try { await api('POST', `/api/film/${encodeURIComponent(RF.current)}/run`, { action }); await refresh(); }
+    catch (error) { toast(error.message, 'error', 6500); }
+  }
+
+  function openAdvanced() {
+    if (!RF.current) return;
+    FM.cur = Number(RF.current) || RF.current; FM.creating = false; FM.data = RF.detail;
+    store.set('filmCur', FM.cur); showPage('film');
+  }
+
+  async function queueDialog() {
+    try { RF.queue = await api('GET', '/api/queue/film'); } catch (error) { toast(error.message, 'error'); return; }
+    const modal = openModal({ title: 'Hàng chờ phim tham chiếu', icon: 'list-ordered', wide: true, body: '' });
+    const render = () => {
+      const ids = new Set(RF.projects.map((p) => String(p.id)));
+      const items = (RF.queue?.items || []).filter((item) => ids.has(String(item.sid)));
+      modal.el.querySelector('.modal-body').innerHTML = `<div class="rf-actions"><button type="button" class="btn ghost sm" data-rf-q="${RF.queue?.paused ? 'resume' : 'pause'}">${ic(RF.queue?.paused ? 'play' : 'square')}${RF.queue?.paused ? 'Chạy tiếp hàng chờ' : 'Tạm dừng hàng chờ'}</button><label class="field inline"><span>Chạy cùng lúc</span><select class="input xs" id="rfQParallel">${[1, 2, 3, 4].map((n) => `<option value="${n}" ${RF.queue?.parallel === n ? 'selected' : ''}>${n} phim</option>`).join('')}</select></label><button type="button" class="btn ghost sm" data-rf-q="refresh">${ic('refresh')}Làm mới</button></div><p class="hint" style="margin-top:12px">Hàng chờ dùng chung bộ điều phối với mục Làm phim. Tạm dừng và số phim chạy cùng lúc áp dụng cho cả hai mục.</p><div class="rf-queue-list">${items.map((item) => `<div class="rf-queue-item"><span class="chip xs">${esc(phaseLabel(item.phase))}${item.phase === 'waiting' ? ` #${item.order || ''}` : ''}</span><div><strong>${esc(item.name || 'Phim tham chiếu')}</strong><small>${esc(item.message || '')}</small></div><button type="button" class="btn ghost xs" data-rf-qopen="${esc(item.sid)}">Mở</button><button type="button" class="icon-btn" data-rf-qremove="${esc(item.id)}" title="Bỏ khỏi hàng chờ, giữ dự án">${ic('x')}</button></div>`).join('') || '<p class="hint">Chưa có phim tham chiếu trong hàng chờ.</p>'}</div>`;
+    };
+    render();
+    const poll = async () => {
+      if (!modal.el.isConnected || !active()) return;
+      try { RF.queue = await api('GET', '/api/queue/film'); if (!modal.el.querySelector('select:focus')) render(); }
+      catch { /* Preserve the last actual queue view until the next refresh. */ }
+      if (modal.el.isConnected) setTimeout(poll, 5000);
+    };
+    setTimeout(poll, 5000);
+    modal.el.addEventListener('click', async (event) => {
+      const openBtn = event.target.closest('[data-rf-qopen]');
+      if (openBtn) { modal.close(); selectProject(openBtn.dataset.rfQopen); return; }
+      const remove = event.target.closest('[data-rf-qremove]'), button = event.target.closest('[data-rf-q]');
+      if (!remove && !button) return;
+      try {
+        RF.queue = button?.dataset.rfQ === 'refresh' ? await api('GET', '/api/queue/film') : await api('POST', '/api/queue/film', remove ? { action: 'remove', id: Number(remove.dataset.rfQremove) } : { action: button.dataset.rfQ });
+        render(); renderList();
+      } catch (error) { toast(error.message, 'error'); }
+    });
+    modal.el.addEventListener('change', async (event) => {
+      if (event.target.id !== 'rfQParallel') return;
+      try { RF.queue = await api('POST', '/api/queue/film', { action: 'parallel', parallel: Number(event.target.value) }); render(); }
+      catch (error) { toast(error.message, 'error'); }
+    });
+  }
+
+  const page = field('page-reference-film');
+  page.addEventListener('input', (event) => {
+    const input = event.target, ref = input.closest('[data-rf-ref]');
+    if (ref && input.dataset.rfProp) RF.refs[Number(ref.dataset.rfRef)][input.dataset.rfProp] = input.value;
+    if (RF.creating && input.matches('input,textarea,select')) { saveDraft(); refreshControls(); }
+  });
+  page.addEventListener('change', async (event) => {
+    const input = event.target;
+    if (input.id === 'rfFiles') { await addFiles(input.files); input.value = ''; return; }
+    if (input.id === 'rfIdeasFile' && input.files[0]) {
+      const file = input.files[0];
+      if (file.size > 1024 * 1024) return toast('File ý tưởng tối đa 1 MB', 'error');
+      try {
+        field('rfIdea').value = await svReadFile(file);
+        field('rfInputMode').querySelectorAll('button').forEach((b) => { b.classList.toggle('on', b.dataset.rfValue === 'batch'); b.setAttribute('aria-pressed', String(b.dataset.rfValue === 'batch')); });
+        saveDraft(); refreshControls();
+      } catch (error) { toast('Không đọc được file: ' + error.message, 'error'); }
+      input.value = ''; return;
+    }
+    if (input.id === 'rfMusicFile' && input.files[0]) {
+      if (RF.musicFile?.local) URL.revokeObjectURL(RF.musicFile.local);
+      RF.musicFile = input.files[0]; RF.musicFile.local = URL.createObjectURL(RF.musicFile);
+      field('rfMusicName').textContent = RF.musicFile.name;
+      field('rfMusicPreview').src = RF.musicFile.local; field('rfMusicPreview').hidden = false;
+      return;
+    }
+    const ref = input.closest('[data-rf-ref]');
+    if (ref && input.dataset.rfProp) RF.refs[Number(ref.dataset.rfRef)][input.dataset.rfProp] = input.value;
+    if (RF.creating) { saveDraft(); refreshControls(); }
+  });
+  page.addEventListener('click', async (event) => {
+    const target = event.target;
+    const segmentButton = target.closest('[data-rf-value]');
+    if (segmentButton) {
+      segmentButton.parentElement.querySelectorAll('button').forEach((button) => { button.classList.toggle('on', button === segmentButton); button.setAttribute('aria-pressed', String(button === segmentButton)); });
+      saveDraft(); refreshControls(); refreshVoice(); return;
+    }
+    const project = target.closest('[data-rf-project]'); if (project) { selectProject(project.dataset.rfProject); return; }
+    const remove = target.closest('[data-rf-remove]');
+    if (remove) { const index = Number(remove.dataset.rfRemove); if (RF.refs[index]?.local) URL.revokeObjectURL(RF.refs[index].local); RF.refs.splice(index, 1); saveDraft(); renderRefs(); return; }
+    const run = target.closest('[data-rf-run]'); if (run) { runAction(run.dataset.rfRun); return; }
+    if (target.closest('#rfNew, [data-rf-new]')) { newProject(); return; }
+    if (target.closest('#rfRefresh, [data-rf-reload]')) { refresh(); return; }
+    if (target.closest('[data-rf-queue]')) { queueDialog(); return; }
+    if (target.closest('#rfImportIdeas')) { field('rfIdeasFile').click(); return; }
+    if (target.closest('#rfClearRefs')) { RF.refs.forEach((r) => { if (r.local) URL.revokeObjectURL(r.local); }); RF.refs = []; saveDraft(); renderRefs(); return; }
+    if (target.closest('#rfGo')) { create(true); return; }
+    if (target.closest('#rfCreateOnly')) { create(false); return; }
+    if (target.closest('#rfBulk')) { bulkDialog(); return; }
+    if (target.closest('#rfAdvanced')) { openAdvanced(); return; }
+    if (target.closest('#rfMore')) { RF.limit += 24; renderDetail(); return; }
+    if (target.closest('#rfStop')) {
+      try { await api('POST', `/api/film/${encodeURIComponent(RF.current)}/stop`); await refresh(); }
+      catch (error) { toast(error.message, 'error'); } return;
+    }
+    if (target.closest('#rfDelete')) {
+      if (!await confirmDialog('Xoá dự án phim tham chiếu này? File ảnh, clip và phim đã tạo vẫn được giữ.', { title: 'Xoá dự án', danger: true, ok: 'Xoá dự án' })) return;
+      try { await api('DELETE', `/api/film/${encodeURIComponent(RF.current)}`); RF.current = null; RF.detail = null; RF.creating = true; store.set('referenceFilmCurrent', null); await refresh(); }
+      catch (error) { toast(error.message, 'error'); } return;
+    }
+    const saveKey = target.closest('#rfVtSave');
+    if (saveKey) {
+      const key = field('rfVtKey')?.value.trim(); if (!key) return toast('Dán API key VoiceTube trước', 'warn');
+      saveKey.disabled = true;
+      try { S.vt = await api('POST', '/api/voicetube', { key }); vtInfo(S.vt); FM.vtVoices = null; field('rfVtKey').value = ''; field('rfVtKey').blur(); refreshVoice(); toast('Đã lưu API key VoiceTube', 'success'); }
+      catch (error) { toast(error.message, 'error', 6000); saveKey.disabled = false; }
+    }
+  });
+  window.addEventListener('beforeunload', () => { if (RF.creating && field('rfIdea')) saveDraft(); });
+  window.ReferenceFilm = { open, refresh };
+})();

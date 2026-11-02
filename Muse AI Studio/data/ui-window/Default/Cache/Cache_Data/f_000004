@@ -1,0 +1,1290 @@
+/* User-written 4–30 scene storyboard batches with horizontal left-image / right-prompt layout, 1->N continuity, and theatrical postproduction. */
+(() => {
+  'use strict';
+  const $id = (id) => document.getElementById(id);
+  const MIN_SCENES = 4;
+  const MAX_SCENES = 30;
+  const LANGS = [
+    ['vi', 'Tiếng Việt'],
+    ['en', 'English (Tiếng Anh Quốc tế)'],
+    ['en-US', 'English - US (Tiếng Anh Mỹ)'],
+    ['en-GB', 'English - UK (Tiếng Anh Anh Quốc)'],
+    ['en-AU', 'English - Australia (Tiếng Anh Úc)'],
+    ['en-CA', 'English - Canada (Tiếng Anh Canada)'],
+    ['fr-CA', 'Français - Canada (Tiếng Pháp Canada)'],
+    ['ja', '日本語 (Tiếng Nhật)'],
+    ['ko', '한국어 (Tiếng Hàn)'],
+    ['es', 'Español (Tiếng Tây Ban Nha)'],
+    ['de', 'Deutsch (Tiếng Đức)'],
+    ['fr', 'Français (Tiếng Pháp)'],
+    ['it', 'Italiano (Tiếng Ý)'],
+    ['nl', 'Nederlands (Tiếng Hà Lan)'],
+    ['sv', 'Svenska (Tiếng Thụy Điển)'],
+    ['no', 'Norsk (Tiếng Na Uy)'],
+    ['da', 'Dansk (Tiếng Đan Mạch)'],
+    ['fi', 'Suomi (Tiếng Phần Lan)'],
+    ['de-CH', 'Deutsch - Schweiz (Thụy Sĩ)'],
+    ['en-SG', 'English - Singapore (Singapore)'],
+    ['ar-AE', 'العربية - الإمارات (UAE)'],
+    ['zh-TW', '繁體中文 (Đài Loan / Hồng Kông)'],
+    ['zh', '中文 (Tiếng Trung phổ thông)'],
+    ['pt', 'Português (Bồ Đào Nha – Brazil)'],
+    ['th', 'ภาษาไทย (Tiếng Thái)'],
+    ['id', 'Bahasa Indonesia'],
+    ['ru', 'Русский (Tiếng Nga)'],
+    ['tr', 'Türkçe (Thổ Nhĩ Kỳ)'],
+    ['hi', 'हिन्दी (Tiếng Hindi)'],
+    ['ar', 'العربية (Tiếng Ả Rập)'],
+  ];
+  const MOODS = [
+    ['auto', 'Tự động theo mạch phim'],
+    ['cinematic', 'Điện ảnh ngoài rạp'],
+    ['action', 'Hành động sống động'],
+    ['emotional', 'Cảm xúc sâu lắng'],
+    ['tension', 'Kịch tính hồi hộp'],
+    ['climax', 'Cao trào bùng nổ'],
+    ['warm', 'Ấm áp trong trẻo'],
+    ['mystery', 'Bí ẩn cuốn hút'],
+  ];
+  const sceneId = () => 'scene_' + Math.random().toString(36).slice(2, 11);
+  const blankScene = (characters = ['character_1'], index = 1) => ({
+    id: sceneId(),
+    prompt: '',
+    character_ids: [...characters],
+    storyboard_file: '',
+    storyboard_name: '',
+    storyboard_label: `Storyboard cảnh ${String(index).padStart(2, '0')}`,
+    storyboard_url: '',
+    continuity_prev: '',
+    continuity_next: '',
+    mood: 'auto',
+  });
+  const defaults = {
+    title: '',
+    ratio: '16:9',
+    lang: 'vi',
+    accent: 'north',
+    parallel: 10,
+    same_character: true,
+    same_voice: true,
+    continuity_lock: true,
+    auto_postproduce: true,
+    reference_images: [],
+    characters: [
+      {
+        id: 'character_1',
+        name: 'Nhân vật 1',
+        description: 'Giữ đồng nhất 100% khuôn mặt, kiểu tóc, trang phục và thần thái theo ảnh tham chiếu xuyên suốt mọi phân cảnh.',
+        voice: 'Giọng trưởng thành, rõ chữ, tốc độ vừa, âm sắc ấm và giàu cảm xúc điện ảnh; giữ nguyên đồng nhất ở mọi phân cảnh.',
+        reference_file: '',
+      },
+    ],
+    scenes: Array.from({ length: 10 }, (_, idx) => blankScene(['character_1'], idx + 1)),
+  };
+  const restored = store.get('sceneBatchDraft', null);
+  const clampScenes = (list, chars) => {
+    const arr = Array.isArray(list) ? list.slice(0, MAX_SCENES) : [];
+    while (arr.length < MIN_SCENES) arr.push(blankScene(chars, arr.length + 1));
+    return arr.map((s, idx) => ({ ...blankScene(chars, idx + 1), ...s }));
+  };
+  const initialDraft = restored && Array.isArray(restored.scenes)
+    ? { ...defaults, ...restored, scenes: clampScenes(restored.scenes, (restored.characters || defaults.characters).map((c) => c.id)) }
+    : defaults;
+  const B = {
+    draft: initialDraft,
+    projects: [],
+    detail: null,
+    current: store.get('sceneBatchCurrent', null),
+    creating: true,
+    loading: false,
+    busy: false,
+    uploading: 0,
+    timer: null,
+    error: '',
+    capacity: null,
+    editView: null,
+    edit: null,
+    editDirty: false,
+    music: null,
+    targetSceneUploadIndex: null,
+  };
+  const root = $id('sceneBatchWorkspace'), page = $id('page-reference-film');
+  const active = () => S.page === 'reference-film' && window.ReferenceWorkspaceMode === 'scenes';
+  const phase = (v) => ({
+    draft: 'Chưa chạy', queued: 'Đang chờ', pending: 'Đang chờ', running: 'Đang chạy', processing: 'Đang xử lý',
+    done: 'Hoàn thành', completed: 'Hoàn thành', success: 'Hoàn thành', failed: 'Lỗi', error: 'Lỗi',
+    stopped: 'Đã dừng', cancelled: 'Đã dừng', partial: 'Có cảnh cần xử lý', rendering: 'Đang dựng phim',
+    idle: 'Chưa dựng', interrupted: 'Đã gián đoạn', cancelling: 'Đang dừng',
+  }[v] || v || 'Chưa chạy');
+  const opt = (values, selected) => values.map(([id, label]) => `<option value="${esc(id)}" ${String(id) === String(selected) ? 'selected' : ''}>${esc(label)}</option>`).join('');
+  const fileUrl = (file) => '/files?p=' + encodeURIComponent(file);
+  const refUrl = (r) => r?.local || r?.url || '';
+  const isBusy = (d) => ['running', 'queued', 'processing', 'rendering'].includes(d?.status);
+  const notify = (error) => toast(error.message || String(error), 'error', 7000);
+
+  function findImageUrl(fileId) {
+    if (!fileId) return '';
+    const shared = B.draft.reference_images.find((r) => r.file === fileId);
+    if (shared) return refUrl(shared);
+    const fromScene = B.draft.scenes.find((s) => s.storyboard_file === fileId && s.storyboard_url);
+    return fromScene ? fromScene.storyboard_url : '';
+  }
+
+  function collect() {
+    if (!$id('sbTitle')) return B.draft;
+    const d = {
+      ...B.draft,
+      title: $id('sbTitle').value.trim(),
+      ratio: $id('sbRatio').value,
+      lang: $id('sbLang').value,
+      accent: $id('sbAccent').value,
+      parallel: Number($id('sbParallel').value) || 10,
+      same_character: $id('sbSameCharacter').checked,
+      same_voice: $id('sbSameVoice').checked,
+      continuity_lock: $id('sbContinuityLock') ? $id('sbContinuityLock').checked : true,
+      auto_postproduce: $id('sbAutoPostproduce') ? $id('sbAutoPostproduce').checked : true,
+    };
+    d.characters = [...root.querySelectorAll('[data-sb-character]')].map((el) => ({
+      id: el.dataset.sbCharacter,
+      name: el.querySelector('[data-char-name]').value.trim(),
+      description: el.querySelector('[data-char-description]').value.trim(),
+      voice: el.querySelector('[data-char-voice]').value.trim(),
+      reference_file: el.querySelector('[data-char-ref]').value,
+    }));
+    d.scenes = [...root.querySelectorAll('[data-sb-scene]')].map((el, idx) => {
+      const prev = B.draft.scenes[idx] || {};
+      const sbFile = el.querySelector('[data-scene-sb-file]')?.value || prev.storyboard_file || '';
+      const sbLabel = el.querySelector('[data-scene-sb-label]')?.value.trim() || prev.storyboard_label || `Storyboard cảnh ${String(idx + 1).padStart(2, '0')}`;
+      return {
+        id: el.dataset.sbScene,
+        prompt: el.querySelector('[data-scene-prompt]') ? el.querySelector('[data-scene-prompt]').value.trim() : el.querySelector('textarea').value.trim(),
+        character_ids: [...el.querySelectorAll('[data-scene-cast]:checked')].map((input) => input.value),
+        storyboard_file: sbFile,
+        storyboard_name: prev.storyboard_name || sbFile,
+        storyboard_label: sbLabel,
+        storyboard_url: findImageUrl(sbFile) || prev.storyboard_url || '',
+        continuity_prev: el.querySelector('[data-scene-cont-prev]')?.value.trim() || '',
+        continuity_next: el.querySelector('[data-scene-cont-next]')?.value.trim() || '',
+        mood: el.querySelector('[data-scene-mood]')?.value || prev.mood || 'auto',
+      };
+    });
+    d.reference_images = B.draft.reference_images;
+    return d;
+  }
+
+  function saveDraft() {
+    B.draft = collect();
+    store.set('sceneBatchDraft', B.draft);
+    refreshDraftCapacity();
+  }
+
+  function errorBox(message) {
+    const box = $id('sbError');
+    if (box) {
+      box.hidden = !message;
+      box.textContent = message;
+    }
+  }
+
+  function shell() {
+    if (!$id('sbMain')) {
+      root.innerHTML = '<div class="sb-wrap"><aside class="sb-list card" id="sbList" aria-label="Dự án phân cảnh"></aside><main class="sb-main" id="sbMain"></main></div>';
+    }
+  }
+
+  function list() {
+    const el = $id('sbList');
+    if (!el) return;
+    el.innerHTML = `<button type="button" class="sv-item ${B.creating ? 'on' : ''}" data-sb-new>${ic('plus')}<b>Dàn phân cảnh mới</b><small>${MIN_SCENES}–${MAX_SCENES} phân cảnh · Storyboard &amp; Phim</small></button><span class="rf-list-label">Dự án · ${B.projects.length}</span>${B.error ? `<div class="rf-list-status rf-list-error">${esc(B.error)}</div>` : ''}${B.projects.map((p) => `<button type="button" class="sv-item ${!B.creating && String(B.current) === String(p.id) ? 'on' : ''}" data-sb-project="${esc(p.id)}"><b>${esc(p.title || 'Dàn phân cảnh')}</b><small>${p.scene_count ?? p.scenes?.length ?? p.counts?.total ?? ''} cảnh · ${esc(phase(p.status))}</small></button>`).join('')}${!B.projects.length ? '<p class="rf-list-status">Chọn từ 4 đến 30 phân cảnh: bên trái là ảnh tham chiếu Storyboard, bên phải là câu lệnh từng phân cảnh khớp liền mạch như phim.</p>' : ''}`;
+  }
+
+  function sceneCountOptions(selectedCount) {
+    const counts = [];
+    for (let c = MIN_SCENES; c <= MAX_SCENES; c++) counts.push([String(c), `${c} phân cảnh`]);
+    return opt(counts, String(selectedCount));
+  }
+
+  function createView() {
+    const d = B.draft;
+    const countPresets = [4, 6, 8, 10, 12, 15, 20, 24, 30];
+    $id('sbMain').innerHTML = `<div class="sb-create">
+      <section class="card">
+        <div class="sb-head">
+          <div>
+            <h2>Làm Phim Bằng Ảnh Tham Chiếu Storyboard (${MIN_SCENES}–${MAX_SCENES} Phân Cảnh)</h2>
+            <p>Dàn hàng ngang trực quan: <b>Bên trái là ảnh tham chiếu Storyboard của từng phân cảnh</b> — <b>Bên phải là Prompt câu lệnh phân cảnh đó</b>. Cảnh cuối của phân cảnh 1 tự động khớp làm mở đầu của phân cảnh 2 và nối mượt đến phân cảnh thứ N, đồng nhất nhân vật &amp; giọng nói, ghép nhạc nền điện ảnh ngoài rạp và phụ đề đa ngôn ngữ.</p>
+          </div>
+          ${ic('clapper')}
+        </div>
+        <div class="sb-flow">
+          <span><b>1</b>Chọn ${MIN_SCENES}–${MAX_SCENES} phân cảnh</span><i>→</i>
+          <span><b>2</b>Trái: Ảnh Storyboard · Phải: Prompt</span><i>→</i>
+          <span><b>3</b>Khớp mượt Cảnh 1 → Cảnh N</span><i>→</i>
+          <span><b>4</b>Nối phim, Nhạc rạp &amp; Phụ đề Đa Quốc Gia</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="sb-section-head">
+          <h3>${ic('users')}Đồng nhất nhân vật, giọng nói &amp; Ảnh gốc tham chiếu</h3>
+          <button type="button" class="btn ghost xs" id="sbAddCharacter">${ic('plus')}Thêm nhân vật</button>
+        </div>
+        <div class="sb-checks">
+          <label class="chk"><input type="checkbox" id="sbSameCharacter" ${d.same_character ? 'checked' : ''}><span>Đồng nhất ngoại hình nhân vật trong mọi phân cảnh</span></label>
+          <label class="chk"><input type="checkbox" id="sbSameVoice" ${d.same_voice ? 'checked' : ''}><span>Đồng nhất giọng nói cố định trong mọi phân cảnh</span></label>
+          <label class="chk"><input type="checkbox" id="sbContinuityLock" ${d.continuity_lock !== false ? 'checked' : ''}><span>Khóa mạch nối: Cảnh cuối phân cảnh trước = Mở đầu phân cảnh sau (1 → N)</span></label>
+          <label class="chk"><input type="checkbox" id="sbAutoPostproduce" ${d.auto_postproduce !== false ? 'checked' : ''}><span>Chuẩn bị hậu kỳ rạp: nối mượt, nhạc nền theo cảnh &amp; phụ đề đa ngôn ngữ</span></label>
+        </div>
+        <input type="file" id="sbRefFiles" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" multiple hidden>
+        <div class="rf-drop" id="sbRefDrop" role="button" tabindex="0" aria-label="Chọn ảnh tham chiếu gốc nhân vật hoặc bối cảnh" style="margin-top:12px">
+          ${ic('upload-cloud')}
+          <div>
+            <strong>Tải ảnh gốc nhân vật / bối cảnh chung (1–4 ảnh) hoặc tải ảnh Storyboard riêng ở từng phân cảnh bên dưới</strong>
+            <p>PNG, JPG, WebP · tối đa 20 MB/ảnh · Giữ nguyên khuôn mặt, trang phục và phong cách xuyên suốt bộ phim</p>
+          </div>
+          <span class="btn ghost sm">Chọn ảnh gốc</span>
+        </div>
+        <div class="sb-ref-grid">${d.reference_images.map((r, i) => `<div class="sb-ref"><img src="${esc(refUrl(r))}" alt="Ảnh tham chiếu ${i + 1}"><div><input class="input" data-sb-ref-label="${i}" aria-label="Tên ảnh ${i + 1}" value="${esc(r.label || '')}" placeholder="Tên nhân vật / bối cảnh"><select class="input select" data-sb-ref-role="${i}" aria-label="Vai trò ảnh ${i + 1}">${opt([['character', 'Nhân vật'], ['location', 'Bối cảnh'], ['prop', 'Đạo cụ / sản phẩm'], ['style', 'Storyboard / Phong cách']], r.role || 'character')}</select><small>${esc(r.name || r.file)}</small></div><button type="button" class="icon-btn" data-sb-remove-ref="${i}" aria-label="Bỏ ảnh ${i + 1}">${ic('x')}</button></div>`).join('')}</div>
+        <p class="hint" id="sbUploadStatus">${B.uploading ? 'Đang tải ảnh lên tool…' : 'Mỗi nhân vật được khóa hồ sơ ngoại hình và giọng nói cố định xuyên suốt từ phân cảnh 1 đến phân cảnh thứ N.'}</p>
+        <div class="sb-profile-list">${d.characters.map((c) => `<article class="sb-profile" data-sb-character="${esc(c.id)}"><label>Tên nhân vật<input class="input" data-char-name value="${esc(c.name)}" placeholder="Ví dụ: Mai"></label><label>Ngoại hình cố định xuyên suốt<textarea class="input" data-char-description rows="2" placeholder="Khuôn mặt, kiểu tóc, trang phục…">${esc(c.description || '')}</textarea></label><label>Giọng nói đồng nhất xuyên suốt<textarea class="input" data-char-voice rows="2" placeholder="Nam / nữ, tuổi giọng, âm sắc, cảm xúc thoại…">${esc(c.voice || '')}</textarea></label><label>Ảnh nhân vật<select class="input select" data-char-ref><option value="">Theo mô tả / Storyboard</option>${d.reference_images.map((r, i) => `<option value="${esc(r.file)}" ${r.file === c.reference_file ? 'selected' : ''}>${esc(r.label || r.name || 'Ảnh ' + (i + 1))}</option>`).join('')}</select></label><button type="button" class="icon-btn" data-sb-remove-character="${esc(c.id)}" aria-label="Bỏ nhân vật ${esc(c.name)}">${ic('x')}</button></article>`).join('')}</div>
+      </section>
+
+      <section class="card">
+        <div class="sb-section-head">
+          <h3>${ic('sliders')}Cài đặt bộ phim &amp; Ngôn ngữ</h3>
+          <small>Hỗ trợ Tiếng Việt, Anh, Anh Mỹ, Nhật, Hàn, Tây Ban Nha, Úc, Canada &amp; các nước thu nhập cao</small>
+        </div>
+        <div class="sb-grid">
+          <label class="field sb-span-two"><span>Tên bộ phim / dự án phân cảnh</span><input class="input" id="sbTitle" value="${esc(d.title || '')}" placeholder="Ví dụ: Hành Trình Dưới Ánh Hoàng Hôn"></label>
+          <label class="field"><span>Tỷ lệ khung hình</span><select class="input select" id="sbRatio">${opt([['16:9', '16:9 · Phim Rạp / YouTube'], ['9:16', '9:16 · Shorts / Reels / TikTok'], ['1:1', '1:1 · Vuông']], d.ratio)}</select></label>
+          <label class="field"><span>Ngôn ngữ thoại chính</span><select class="input select" id="sbLang">${opt(LANGS, d.lang)}</select></label>
+          <label class="field"><span>Giọng vùng (Tiếng Việt)</span><select class="input select" id="sbAccent">${opt([['north', 'Bắc · Hà Nội'], ['south', 'Nam · Sài Gòn'], ['central', 'Trung · Huế']], d.accent)}</select></label>
+          <label class="field"><span>Số luồng chạy đồng thời</span><select class="input select" id="sbParallel">${[4, 6, 8, 10, 15, 20, 25, 30].map((n) => `<option value="${n}" ${Number(d.parallel) === n ? 'selected' : ''}>${n} phân cảnh</option>`).join('')}</select></label>
+        </div>
+        <p class="hint" id="sbCapacity" style="margin-top:10px">${esc(draftCapacityText(B.capacity, d.parallel))}</p>
+      </section>
+
+      <section class="card">
+        <div class="sb-section-head">
+          <h3>${ic('list-ordered')}Dàn Hàng Ngang Storyboard &amp; Prompt Từng Phân Cảnh (${d.scenes.length} phân cảnh · Chọn từ ${MIN_SCENES} đến ${MAX_SCENES})</h3>
+          <small>Bên trái: Ảnh tham chiếu Storyboard · Bên phải: Câu lệnh phân cảnh &amp; Khớp nối cảnh 1 → N</small>
+        </div>
+        <div class="sb-scene-toolbar">
+          <label>Chọn số phân cảnh (4–30)
+            <select class="input select" id="sbSceneCountSelect" aria-label="Chọn nhanh số phân cảnh">${sceneCountOptions(d.scenes.length)}</select>
+          </label>
+          <label>Hoặc nhập số
+            <input class="input" id="sbSceneCount" type="number" min="${MIN_SCENES}" max="${MAX_SCENES}" value="${d.scenes.length}">
+          </label>
+          <button type="button" class="btn ghost xs" id="sbResizeScenes">Áp dụng</button>
+          <button type="button" class="btn primary-alt xs" id="sbUploadStoryboards">${ic('image')}Chọn loạt ảnh Storyboard (Cảnh 1 → ${d.scenes.length})</button>
+          <button type="button" class="btn ghost xs" id="sbAutoContinuity">${ic('sparkles')}Tự khớp mạch nối Cảnh 1 → ${d.scenes.length}</button>
+          <button type="button" class="btn ghost xs" id="sbPasteScenes">${ic('copy')}Dán nhiều câu lệnh</button>
+          <button type="button" class="btn ghost xs" id="sbImportScenes">${ic('upload')}Nhập .txt</button>
+          <input type="file" id="sbScenesFile" accept=".txt,text/plain" hidden>
+          <input type="file" id="sbStoryboardBatchFiles" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" multiple hidden>
+          <input type="file" id="sbSingleSceneStoryboardFile" accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" hidden>
+        </div>
+        <div class="sb-preset-pills" role="group" aria-label="Chọn nhanh số lượng phân cảnh">
+          <span>Chọn nhanh:</span>
+          ${countPresets.map((n) => `<button type="button" class="btn ghost xs ${d.scenes.length === n ? 'on' : ''}" data-sb-preset-count="${n}">${n} cảnh</button>`).join('')}
+        </div>
+        <p class="hint">Mỗi hàng ngang gồm: <b>Cột Trái</b> là ảnh Storyboard tham chiếu của đúng phân cảnh đó; <b>Cột Phải</b> là Prompt câu lệnh, thoại và khóa nối cảnh (cảnh cuối của phân cảnh trước là mở đầu của phân cảnh tiếp theo, liền mạch như 1 bộ phim).</p>
+        <div class="sb-scenes sb-scenes-horizontal">${sceneCards(d)}</div>
+        <div class="sb-actions" style="margin-top:16px">
+          <button type="button" class="btn primary-alt" id="sbStart">${ic('play')}Tạo ${d.scenes.length} phân cảnh phim</button>
+          <button type="button" class="btn ghost" id="sbSave">${ic('check')}Lưu dự án, chạy sau</button>
+          <span class="hint">Tổng thời lượng dự kiến: ${formatSeconds(d.scenes.length * 15)} (${d.scenes.length} phân cảnh liên hoàn)</span>
+        </div>
+        <div class="sb-alert sb-error" id="sbError" role="alert" hidden style="margin-top:12px"></div>
+      </section>
+    </div>`;
+    lockCreate();
+    bindDrop();
+  }
+
+  function resolveScenePreview(d, s, i) {
+    if (s.storyboard_url) return s.storyboard_url;
+    if (s.storyboard_file) {
+      const found = findImageUrl(s.storyboard_file);
+      if (found) return found;
+    }
+    if (d.reference_images && d.reference_images.length) {
+      const fallback = d.reference_images[i % d.reference_images.length];
+      return refUrl(fallback);
+    }
+    return '';
+  }
+
+  function continuityBadgeText(i, total) {
+    const num = String(i + 1).padStart(2, '0');
+    const prev = String(i).padStart(2, '0');
+    const next = String(i + 2).padStart(2, '0');
+    if (i === 0 && total > 1) return `Mở đầu Phim (Cảnh 01) → Cảnh cuối khớp sang Mở đầu Cảnh 02`;
+    if (i === total - 1 && total > 1) return `Khớp từ Cảnh cuối Cảnh ${prev} → Mở đầu Cảnh ${num} (Kết phim hoàn chỉnh)`;
+    return `Cảnh cuối Cảnh ${prev} = Mở đầu Cảnh ${num} → Cảnh cuối khớp sang Cảnh ${next}`;
+  }
+
+  function sceneCards(d) {
+    const total = d.scenes.length;
+    return d.scenes.map((s, i) => {
+      const num = String(i + 1).padStart(2, '0');
+      const prevNum = String(i).padStart(2, '0');
+      const nextNum = String(i + 2).padStart(2, '0');
+      const previewUrl = resolveScenePreview(d, s, i);
+      const hasOwnSb = Boolean(s.storyboard_file);
+      const prevPromptHint = i > 0 && d.scenes[i - 1]?.prompt ? `Khớp tiếp nối từ cuối Cảnh ${prevNum}: ${d.scenes[i - 1].prompt.slice(0, 90)}` : 'Mở đầu bộ phim từ khung hình Storyboard Cảnh 01';
+      const nextPromptHint = i < total - 1 ? `Kết cảnh ${num} dẫn mượt sang mở đầu Cảnh ${nextNum}` : 'Khép lại mạch cảm xúc bộ phim trọn vẹn';
+      return `<article class="sb-scene sb-scene-row" data-sb-scene="${esc(s.id)}" data-sb-scene-index="${i}">
+        <div class="sb-scene-left">
+          <div class="sb-scene-left-head">
+            <span class="sb-scene-badge">Ảnh Storyboard Cảnh ${num}</span>
+            <span class="sb-scene-tag">${hasOwnSb ? 'Ảnh riêng' : d.reference_images.length ? 'Ảnh chung' : 'Chưa chọn'}</span>
+          </div>
+          <div class="sb-storyboard-box" data-sb-pick-scene-image="${i}" role="button" tabindex="0" aria-label="Chọn ảnh tham chiếu Storyboard cho phân cảnh ${i + 1}">
+            ${previewUrl
+              ? `<img src="${esc(previewUrl)}" alt="Ảnh tham chiếu Storyboard phân cảnh ${i + 1}">`
+              : `<div class="sb-storyboard-empty">${ic('image')}<strong>Chọn / Kéo ảnh Storyboard Cảnh ${num}</strong><small>Ảnh tham chiếu bên trái</small></div>`}
+          </div>
+          <div class="sb-scene-left-controls">
+            <input type="hidden" data-scene-sb-file value="${esc(s.storyboard_file || '')}">
+            <input class="input xs" data-scene-sb-label value="${esc(s.storyboard_label || `Storyboard cảnh ${num}`)}" placeholder="Ghi chú ảnh Storyboard cảnh ${num}" aria-label="Nhãn ảnh Storyboard phân cảnh ${i + 1}">
+            <div class="sb-scene-left-btns">
+              <button type="button" class="btn ghost xs" data-sb-pick-scene-image="${i}">${ic('upload')}Đổi ảnh cảnh ${num}</button>
+              ${d.reference_images.length ? `<select class="input xs select" data-scene-sb-select="${i}" aria-label="Chọn từ bộ ảnh đã tải cho cảnh ${i + 1}"><option value="">-- Chọn ảnh đã tải --</option>${d.reference_images.map((r, rIdx) => `<option value="${esc(r.file)}" ${r.file === s.storyboard_file ? 'selected' : ''}>${esc(r.label || r.name || 'Ảnh ' + (rIdx + 1))}</option>`).join('')}</select>` : ''}
+              ${hasOwnSb ? `<button type="button" class="icon-btn" data-sb-clear-scene-image="${i}" title="Bỏ ảnh riêng cảnh ${num}" aria-label="Bỏ ảnh riêng cảnh ${i + 1}">${ic('x')}</button>` : ''}
+            </div>
+          </div>
+          <div class="sb-continuity-pill">${ic('link')}<span>${esc(continuityBadgeText(i, total))}</span></div>
+        </div>
+        <div class="sb-scene-right">
+          <header class="sb-scene-right-head">
+            <div>
+              <b>Phân cảnh ${num} / ${String(total).padStart(2, '0')}</b>
+              <span class="sb-scene-sub">Prompt câu lệnh theo ảnh Storyboard bên trái · 15 giây</span>
+            </div>
+            <label class="sb-mood-field">
+              <span>Nhạc &amp; Cảm xúc cảnh:</span>
+              <select class="input xs select" data-scene-mood aria-label="Nhạc và cảm xúc phân cảnh ${i + 1}">
+                ${opt(MOODS, s.mood || 'auto')}
+              </select>
+            </label>
+          </header>
+          <textarea class="input sb-scene-prompt-input" data-scene-prompt rows="4" aria-label="Câu lệnh phân cảnh ${i + 1}" placeholder="Nhập câu lệnh Phân cảnh ${num} khớp với ảnh Storyboard bên trái: Hành động diễn ra thế nào, góc máy quay, âm thanh hành động và nhân vật nào nói câu thoại gì?">${esc(s.prompt || '')}</textarea>
+          <div class="sb-continuity-inputs">
+            <label>
+              <span>${i === 0 ? 'Khung mở đầu Cảnh 01 (theo Storyboard)' : `Khớp mở đầu Cảnh ${num} (= Cảnh cuối Cảnh ${prevNum})`}</span>
+              <input class="input xs" data-scene-cont-prev value="${esc(s.continuity_prev || '')}" placeholder="${esc(prevPromptHint)}">
+            </label>
+            <label>
+              <span>${i === total - 1 ? `Khung kết thúc Cảnh ${num} (Kết phim mượt)` : `Cảnh cuối Cảnh ${num} (= Mở đầu Cảnh ${nextNum})`}</span>
+              <input class="input xs" data-scene-cont-next value="${esc(s.continuity_next || '')}" placeholder="${esc(nextPromptHint)}">
+            </label>
+          </div>
+          <div class="sb-scene-cast">
+            <span class="sb-cast-label">Nhân vật &amp; Giọng cố định trong cảnh ${num}:</span>
+            ${d.characters.length
+              ? d.characters.map((c) => `<label><input type="checkbox" data-scene-cast value="${esc(c.id)}" ${(s.character_ids || []).includes(c.id) ? 'checked' : ''}>${esc(c.name || 'Chưa đặt tên')}</label>`).join('')
+              : '<small class="hint">Chưa có hồ sơ nhân vật</small>'}
+          </div>
+        </div>
+      </article>`;
+    }).join('');
+  }
+
+  function autoLinkContinuity() {
+    saveDraft();
+    const scenes = B.draft.scenes;
+    for (let i = 0; i < scenes.length; i++) {
+      const cur = scenes[i];
+      const prev = i > 0 ? scenes[i - 1] : null;
+      const next = i < scenes.length - 1 ? scenes[i + 1] : null;
+      if (prev) {
+        const prevText = (prev.prompt || `Phân cảnh ${i}`).trim();
+        const lastSentence = prevText.split(/(?<=[.!?…。])\s+/).filter(Boolean).pop() || prevText;
+        cur.continuity_prev = `Tiếp nối trực tiếp khung hình cuối của Phân cảnh ${String(i).padStart(2, '0')} (${lastSentence.slice(0, 120)}), giữ nguyên vị trí nhân vật, ánh sáng và cảm xúc.`;
+      } else {
+        cur.continuity_prev = `Mở đầu bộ phim từ khung hình ảnh Storyboard Phân cảnh 01, thiết lập không gian và thần thái nhân vật đồng nhất.`;
+      }
+      if (next) {
+        const nextText = (next.prompt || `Phân cảnh ${i + 2}`).trim();
+        const firstSentence = nextText.split(/(?<=[.!?…。])\s+/).filter(Boolean)[0] || nextText;
+        cur.continuity_next = `Khung hình cuối Phân cảnh ${String(i + 1).padStart(2, '0')} chuyển mượt làm cảnh mở đầu Phân cảnh ${String(i + 2).padStart(2, '0')} (${firstSentence.slice(0, 120)}).`;
+      } else {
+        cur.continuity_next = `Khép lại trọn vẹn dòng chảy cảm xúc của bộ phim ở cuối Phân cảnh ${String(i + 1).padStart(2, '0')}.`;
+      }
+    }
+    store.set('sceneBatchDraft', B.draft);
+    createView();
+    toast(`Đã tự động khớp mạch nối liên hoàn từ Phân cảnh 01 đến Phân cảnh ${String(scenes.length).padStart(2, '0')}.`, 'success');
+  }
+
+  function capacityText(c) {
+    if (!c) return 'Tool sẽ kiểm tra năng lực tài khoản và luồng video khi bắt đầu.';
+    const values = [];
+    for (const [key, label] of [['requested', 'Yêu cầu'], ['effective_cap', 'Có thể chạy tối đa'], ['ready_video_slots', 'Luồng video sẵn sàng'], ['global_total_threads', 'Luồng tổng']]) {
+      if (c[key] != null) values.push(label + ': ' + c[key]);
+    }
+    return values.join(' · ') || c.note || 'Số cảnh chạy thực tế theo tài khoản và cài đặt luồng.';
+  }
+
+  function draftCapacityText(c, requested) {
+    const values = ['Yêu cầu: ' + (Number(requested) || 10)];
+    if (!c) return values.join('') + ' · Tool sẽ kiểm tra năng lực tài khoản khi bắt đầu.';
+    const current = Math.min(Number(c.global_total_threads) || 0, Number(c.ready_video_slots) || 0);
+    values.push('Hiện có thể chạy tối đa: ' + current);
+    if (c.ready_video_slots != null) values.push('Luồng video sẵn sàng: ' + c.ready_video_slots);
+    if (c.global_total_threads != null) values.push('Luồng tổng hiện tại: ' + c.global_total_threads);
+    return values.join(' · ');
+  }
+
+  function refreshDraftCapacity() {
+    const el = $id('sbCapacity');
+    if (B.creating && el) el.textContent = draftCapacityText(B.capacity, B.draft.parallel);
+  }
+
+  function formatSeconds(n) {
+    n = Math.max(0, Number(n) || 0);
+    return `${Math.floor(n / 60)} phút ${Math.round(n % 60)} giây`;
+  }
+
+  function lockCreate() {
+    if (!$id('sbTitle')) return;
+    root.querySelectorAll('#sbMain input,#sbMain textarea,#sbMain select,#sbMain button').forEach((el) => {
+      el.disabled = B.busy;
+    });
+    for (const id of ['sbStart', 'sbSave']) {
+      if ($id(id)) $id(id).disabled = B.busy || B.uploading > 0;
+    }
+  }
+
+  function bindDrop() {
+    const el = $id('sbRefDrop');
+    if (!el) return;
+    el.addEventListener('click', () => { if (!B.busy) $id('sbRefFiles').click(); });
+    el.addEventListener('keydown', (e) => {
+      if (['Enter', ' '].includes(e.key)) {
+        e.preventDefault();
+        if (!B.busy) $id('sbRefFiles').click();
+      }
+    });
+    for (const type of ['dragenter', 'dragover']) {
+      el.addEventListener(type, (e) => { e.preventDefault(); el.classList.add('dragover'); });
+    }
+    for (const type of ['dragleave', 'drop']) {
+      el.addEventListener(type, (e) => { e.preventDefault(); el.classList.remove('dragover'); });
+    }
+    el.addEventListener('drop', (e) => addRefs(e.dataTransfer.files));
+  }
+
+  async function uploadSingleRefFile(f) {
+    if (!/\.(png|jpe?g|webp)$/i.test(f.name) || f.size > 20 * 1024 * 1024) {
+      throw new Error('Ảnh phải là PNG/JPG/WebP và không quá 20 MB.');
+    }
+    const result = await api('POST', '/api/refs?name=' + encodeURIComponent(f.name), undefined, f);
+    if (!result.file) throw new Error('Tool chưa trả về mã ảnh đã tải.');
+    return {
+      file: result.file,
+      name: f.name,
+      url: result.url || fileUrl(result.file),
+      role: 'character',
+      label: f.name.replace(/\.[^.]+$/, ''),
+      description: '',
+    };
+  }
+
+  async function addRefs(files) {
+    if (B.busy || B.uploading) return;
+    saveDraft();
+    const incoming = [...files];
+    if (incoming.length + B.draft.reference_images.length > 4) {
+      return toast('Bộ ảnh gốc dùng chung tối đa 4 ảnh. Để tải 4–30 ảnh cho từng phân cảnh, bấm "Chọn loạt ảnh Storyboard (Cảnh 1 → N)".', 'warn');
+    }
+    B.uploading = incoming.length;
+    lockCreate();
+    if ($id('sbUploadStatus')) $id('sbUploadStatus').textContent = 'Đang tải ảnh…';
+    try {
+      for (const f of incoming) {
+        const r = await uploadSingleRefFile(f);
+        B.draft.reference_images.push(r);
+        if (B.draft.reference_images.length === 1 && B.draft.characters[0] && !B.draft.characters[0].reference_file) {
+          B.draft.characters[0].reference_file = r.file;
+        }
+      }
+      store.set('sceneBatchDraft', B.draft);
+    } catch (e) {
+      notify(e);
+    } finally {
+      B.uploading = 0;
+      createView();
+    }
+  }
+
+  async function addSceneStoryboards(files, startSceneIndex = null) {
+    if (B.busy || B.uploading || !files?.length) return;
+    saveDraft();
+    const incoming = [...files];
+    if (startSceneIndex === null && incoming.length >= MIN_SCENES && incoming.length <= MAX_SCENES && incoming.length !== B.draft.scenes.length) {
+      while (B.draft.scenes.length < incoming.length) {
+        B.draft.scenes.push(blankScene(B.draft.characters.map((c) => c.id), B.draft.scenes.length + 1));
+      }
+      if (incoming.length < B.draft.scenes.length && !B.draft.scenes.slice(incoming.length).some((s) => s.prompt)) {
+        B.draft.scenes = B.draft.scenes.slice(0, incoming.length);
+      }
+    }
+    B.uploading = incoming.length;
+    lockCreate();
+    try {
+      for (let k = 0; k < incoming.length; k++) {
+        const targetIdx = startSceneIndex !== null ? startSceneIndex + k : k;
+        if (targetIdx >= B.draft.scenes.length) break;
+        const uploaded = await uploadSingleRefFile(incoming[k]);
+        const scene = B.draft.scenes[targetIdx];
+        scene.storyboard_file = uploaded.file;
+        scene.storyboard_name = uploaded.name;
+        scene.storyboard_url = uploaded.url;
+        if (!scene.storyboard_label || /^Storyboard cảnh \d+$/i.test(scene.storyboard_label)) {
+          scene.storyboard_label = `Storyboard cảnh ${String(targetIdx + 1).padStart(2, '0')} · ${uploaded.label}`;
+        }
+        if (B.draft.reference_images.length < 4 && !B.draft.reference_images.some((r) => r.file === uploaded.file)) {
+          B.draft.reference_images.push({ ...uploaded, role: B.draft.reference_images.length === 0 ? 'character' : 'style' });
+        }
+        if (B.draft.characters[0] && !B.draft.characters[0].reference_file) {
+          B.draft.characters[0].reference_file = uploaded.file;
+        }
+      }
+      store.set('sceneBatchDraft', B.draft);
+      toast(`Đã gắn ảnh Storyboard cho ${Math.min(incoming.length, B.draft.scenes.length)} phân cảnh bên cột trái.`, 'success');
+    } catch (e) {
+      notify(e);
+    } finally {
+      B.uploading = 0;
+      B.targetSceneUploadIndex = null;
+      createView();
+    }
+  }
+
+  function resizeScenesTo(n) {
+    saveDraft();
+    if (!Number.isInteger(n) || n < MIN_SCENES || n > MAX_SCENES) {
+      return toast(`Chọn từ ${MIN_SCENES} đến ${MAX_SCENES} phân cảnh.`, 'warn');
+    }
+    B.draft.scenes = B.draft.scenes.slice(0, n);
+    while (B.draft.scenes.length < n) {
+      B.draft.scenes.push(blankScene(B.draft.characters.map((c) => c.id), B.draft.scenes.length + 1));
+    }
+    store.set('sceneBatchDraft', B.draft);
+    createView();
+  }
+
+  function validate(d) {
+    if (B.uploading) throw new Error('Đợi tải xong ảnh tham chiếu.');
+    const hasAnyRef = (d.reference_images && d.reference_images.length > 0) || (d.scenes && d.scenes.some((s) => s.storyboard_file));
+    if (!hasAnyRef) throw new Error('Chọn ít nhất một ảnh tham chiếu hoặc ảnh Storyboard cho phân cảnh.');
+    if (!Array.isArray(d.scenes) || d.scenes.length < MIN_SCENES || d.scenes.length > MAX_SCENES) {
+      throw new Error(`Một dàn cần từ ${MIN_SCENES} đến ${MAX_SCENES} phân cảnh.`);
+    }
+    const blank = d.scenes.findIndex((s) => !s.prompt);
+    if (blank >= 0) throw new Error(`Nhập câu lệnh cho phân cảnh ${blank + 1}.`);
+    if (d.scenes.some((s) => s.prompt.length < 5)) throw new Error('Mỗi câu lệnh cần ít nhất 5 ký tự.');
+    if ((d.same_character || d.same_voice) && !d.characters.length) throw new Error('Thêm hồ sơ nhân vật hoặc bỏ chọn đồng nhất.');
+    for (const c of d.characters) {
+      if (!c.name) throw new Error('Mỗi hồ sơ nhân vật cần có tên.');
+      if (d.same_character && !c.description && !c.reference_file) throw new Error(`Chọn ảnh hoặc mô tả ngoại hình của ${c.name}.`);
+      if (d.same_voice && !c.voice) throw new Error(`Nhập mô tả giọng cố định cho ${c.name}.`);
+    }
+  }
+
+  async function submit(run) {
+    if (B.busy) return;
+    saveDraft();
+    errorBox('');
+    try {
+      validate(B.draft);
+    } catch (e) {
+      errorBox(e.message);
+      return;
+    }
+    B.busy = true;
+    lockCreate();
+    try {
+      const result = await api('POST', '/api/scene-batches', { ...B.draft, run });
+      B.current = result.id;
+      B.detail = result;
+      B.creating = false;
+      B.edit = null;
+      B.editView = null;
+      store.set('sceneBatchCurrent', B.current);
+      toast(run ? 'Đã gửi dàn phân cảnh Storyboard vào bộ điều phối.' : 'Đã lưu dự án phân cảnh Storyboard.', 'success');
+      await refresh();
+    } catch (e) {
+      errorBox(e.message);
+      notify(e);
+    } finally {
+      B.busy = false;
+      lockCreate();
+    }
+  }
+
+  function importLines(text) {
+    const lines = String(text).replace(/^\uFEFF/, '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (lines.length < MIN_SCENES || lines.length > MAX_SCENES) {
+      throw new Error(`Cần từ ${MIN_SCENES} đến ${MAX_SCENES} dòng câu lệnh, mỗi dòng là một phân cảnh.`);
+    }
+    saveDraft();
+    const castIds = B.draft.characters.map((c) => c.id);
+    B.draft.scenes = lines.map((prompt, idx) => {
+      const old = B.draft.scenes[idx] || {};
+      return {
+        ...blankScene(castIds, idx + 1),
+        ...old,
+        id: old.id || sceneId(),
+        prompt,
+        character_ids: old.character_ids?.length ? old.character_ids : [...castIds],
+      };
+    });
+    store.set('sceneBatchDraft', B.draft);
+    createView();
+  }
+
+  function pasteDialog() {
+    openModal({
+      title: 'Dán câu lệnh theo từng phân cảnh Storyboard',
+      icon: 'list-ordered',
+      wide: true,
+      body: `<label class="field"><span>Mỗi dòng 1 phân cảnh · từ ${MIN_SCENES} đến ${MAX_SCENES} phân cảnh · khớp theo ảnh Storyboard bên trái</span><textarea class="input" id="sbPasteText" rows="12" placeholder="Phân cảnh 1: Mở đầu…&#10;Phân cảnh 2: Tiếp nối cảnh cuối phân cảnh 1…&#10;Phân cảnh 3:…&#10;Phân cảnh 4:…"></textarea></label><p class="hint">Danh sách này điền vào các ô câu lệnh bên phải và giữ nguyên ảnh Storyboard bên trái cùng hồ sơ nhân vật.</p>`,
+      foot: [
+        { label: 'Huỷ', cls: 'ghost' },
+        {
+          label: 'Áp dụng vào dàn ngang',
+          cls: 'primary-alt',
+          onClick: async (el) => {
+            try {
+              importLines(el.querySelector('#sbPasteText').value);
+            } catch (e) {
+              notify(e);
+              return false;
+            }
+          },
+        },
+      ],
+    });
+  }
+
+  function clipUrl(scene) { return scene.clip_url || ''; }
+
+  function detailView() {
+    const d = B.detail;
+    if (!d) return;
+    const scenes = d.scenes || [];
+    const completed = scenes.filter((s) => clipUrl(s) || s.clip_files?.length).length;
+    const errors = scenes.filter((s) => ['error', 'failed'].includes(s.task?.status)).length;
+    $id('sbMain').innerHTML = `<div class="sb-detail">
+      <section class="card">
+        <div class="sb-head">
+          <div>
+            <h2>${esc(d.title || 'Dàn phân cảnh Storyboard')}</h2>
+            <p>${scenes.length} phân cảnh (${MIN_SCENES}–${MAX_SCENES} cảnh) · Khớp mạch Cảnh 1 → Cảnh ${scenes.length} · ${esc(phase(d.status))}</p>
+          </div>
+          <button type="button" class="btn ghost xs" data-sb-refresh>${ic('refresh')}Làm mới</button>
+        </div>
+        <div class="sb-summary">
+          <span>${completed}/${scenes.length} clip đã tạo</span>
+          <span>${errors} cảnh lỗi</span>
+          <span>${esc(d.settings?.ratio || '16:9')}</span>
+          <span>${d.settings?.same_character ? 'Đồng nhất nhân vật' : 'Tự do ngoại hình'}</span>
+          <span>${d.settings?.same_voice ? 'Đồng nhất giọng nói' : 'Giọng theo câu lệnh'}</span>
+          <span>${d.settings?.continuity_lock !== false ? 'Khớp mượt Cảnh 1 → N' : 'Từng cảnh độc lập'}</span>
+        </div>
+        <p class="hint">${esc(capacityText(d.capacity || B.capacity))}</p>
+        ${d.capacity?.note ? `<p class="hint">${esc(d.capacity.note)}</p>` : ''}
+        <div class="sb-actions">
+          <button type="button" class="btn primary-alt sm" data-sb-start ${isBusy(d) ? 'disabled' : ''}>${ic('play')}Chạy các cảnh chưa xong</button>
+          <button type="button" class="btn ghost sm" data-sb-retry ${isBusy(d) ? 'disabled' : ''}>${ic('refresh')}Chạy lại cảnh lỗi</button>
+          <button type="button" class="btn ghost sm" data-sb-stop ${isBusy(d) ? '' : 'disabled'}>${ic('square')}Dừng dàn</button>
+          <button type="button" class="btn ghost sm" data-sb-jump-edit>${ic('film')}Nối phim, Nhạc rạp &amp; Phụ đề</button>
+        </div>
+        ${B.error ? `<p class="rf-error">${esc(B.error)}</p>` : ''}
+      </section>
+      <section class="card">
+        <div class="sb-section-head">
+          <h3>${ic('clapper')}Storyboard &amp; Video Clip Từng Phân Cảnh (1 → ${scenes.length})</h3>
+          <small>Cảnh cuối phân cảnh trước khớp mở đầu phân cảnh tiếp theo</small>
+        </div>
+        <div class="sb-output-grid">${scenes.map((s, i) => {
+          const task = s.task || {};
+          const url = clipUrl(s);
+          const actual = s.duration_actual ?? B.editView?.clips?.find((c) => String(c.scene_id) === String(s.id))?.duration;
+          const sbUrl = s.storyboard_url || (d.reference_images?.[i % (d.reference_images?.length || 1)]?.url) || '';
+          return `<article class="sb-result">
+            ${url
+              ? `<video controls preload="none" poster="${esc(sbUrl)}" src="${esc(url)}"></video>`
+              : `<div class="sb-media-placeholder">${sbUrl ? `<img src="${esc(sbUrl)}" alt="Storyboard cảnh ${i + 1}" style="max-height:110px;object-fit:contain;border-radius:6px;margin:auto">` : ic(['error', 'failed'].includes(task.status) ? 'alert' : 'film')}<span>${esc(phase(task.status || 'draft'))}</span></div>`}
+            <div class="sb-result-body">
+              <header><b>Phân cảnh ${String(i + 1).padStart(2, '0')}</b><span class="chip xs">${esc(phase(task.status || 'draft'))}</span></header>
+              <p>${esc(s.prompt)}</p>
+              <small>${esc(continuityBadgeText(i, scenes.length))}</small>
+              <small>${esc((s.character_ids || []).map((id) => d.characters?.find((c) => c.id === id)?.name || id).join(' · '))}</small>
+              ${actual != null ? `<small>Thời lượng thực tế: ${Number(actual).toFixed(1)} giây</small>` : ''}
+              ${task.message ? `<small>${esc(task.message)}</small>` : ''}
+              ${task.error ? `<div class="rf-error">${esc(task.error)}</div>` : ''}
+              ${!url && task.progress != null ? `<div class="sb-clip-progress"><i style="width:${Math.min(100, Math.max(0, Number(task.progress) || 0))}%"></i></div>` : ''}
+              <div class="sb-actions" style="margin-top:8px">
+                ${url ? `<a class="btn ghost xs" href="${esc(url)}" download>${ic('download')}Tải clip</a>` : ''}
+                ${['error', 'failed', 'stopped', 'cancelled'].includes(task.status) ? `<button type="button" class="btn ghost xs" data-sb-retry-scene="${esc(s.id)}">Chạy lại cảnh</button>` : ''}
+              </div>
+            </div>
+          </article>`;
+        }).join('')}</div>
+      </section>
+      <section class="card" id="sbPostCard">
+        <div class="sb-section-head">
+          <h3>${ic('film')}Hậu Kỳ Phim Rạp: Nối Mượt Phân Cảnh, Nhạc Nền Theo Mạch Phim &amp; Phụ Đề Đa Quốc Gia</h3>
+          <small>Cắt ghép sửa lỗi thành 1 bộ phim hoàn chỉnh mượt theo 1 dòng chảy không ngắt quãng cảm xúc</small>
+        </div>
+        <div id="sbPostEditor">${postHtml()}</div>
+      </section>
+    </div>`;
+  }
+
+  function currentEdit() {
+    if (!$id('sbSubtitleLang') || !B.edit) return B.edit;
+    const next = { ...B.edit };
+    next.clips = [...root.querySelectorAll('[data-sb-edit-scene]')]
+      .filter((el) => el.querySelector('[data-edit-enabled]').checked)
+      .map((el) => ({
+        scene_id: el.dataset.sbEditScene,
+        trim_in: Number(el.querySelector('[data-edit-in]').value) || 0,
+        trim_out: el.querySelector('[data-edit-out]').value === '' ? null : Number(el.querySelector('[data-edit-out]').value),
+      }));
+    next.subtitle_lang = $id('sbSubtitleLang').value;
+    next.subtitles_srt = $id('sbSrtText').value;
+    next.subtitle_tracks = { ...(next.subtitle_tracks || {}) };
+    if (next.subtitle_lang) next.subtitle_tracks[next.subtitle_lang] = { srt: next.subtitles_srt };
+    if ($id('sbMusicMode')) next.music_mode = $id('sbMusicMode').value;
+    next.music_volume = Number($id('sbMusicVolume').value);
+    next.dialogue_volume = Number($id('sbDialogueVolume').value);
+    if ($id('sbCinemaAudio')) next.cinema_audio = $id('sbCinemaAudio').checked;
+    if ($id('sbSeamlessFlow')) next.seamless_flow = $id('sbSeamlessFlow').checked;
+    if ($id('sbAutoFixClips')) next.auto_fix_clips = $id('sbAutoFixClips').checked;
+    return next;
+  }
+
+  function rememberEdit() {
+    if (!B.edit) return;
+    B.edit = currentEdit();
+    B.editDirty = true;
+  }
+
+  function hydrateEdit(view) {
+    B.editView = view;
+    const e = view.edit || {};
+    B.edit = {
+      ...e,
+      clips: Array.isArray(e.clips) ? e.clips.map((c) => ({ ...c })) : [],
+      subtitle_lang: e.subtitle_lang || '',
+      subtitles_srt: e.subtitle_tracks?.[e.subtitle_lang]?.srt || '',
+      music_mode: e.music_mode || (e.music_file ? 'upload' : 'auto_cinematic'),
+      music_volume: e.music_volume ?? 0.22,
+      dialogue_volume: e.dialogue_volume ?? 1,
+      cinema_audio: e.cinema_audio !== false,
+      seamless_flow: e.seamless_flow !== false,
+      auto_fix_clips: e.auto_fix_clips !== false,
+    };
+    B.editDirty = false;
+  }
+
+  function postHtml() {
+    const view = B.editView, e = B.edit;
+    if (!view || !e) return '<p class="hint">Đang tải dữ liệu clip và bàn dựng hậu kỳ…</p>';
+    const source = view.clips || [];
+    const eligible = source.filter((c) => c.path || c.url);
+    const order = e.clips.map((c) => c.scene_id);
+    const ordered = [
+      ...e.clips.map((c) => eligible.find((s) => String(s.scene_id) === String(c.scene_id))).filter(Boolean),
+      ...eligible.filter((c) => !order.some((id) => String(id) === String(c.scene_id))),
+    ];
+    const render = view.render || {};
+    const rendering = ['queued', 'running', 'rendering', 'processing'].includes(render.status);
+    const trackCount = Object.keys(e.subtitle_tracks || {}).filter((k) => e.subtitle_tracks[k]?.srt).length;
+    return `<p class="sb-copy">Nối các phân cảnh 1 → N thành một bộ phim hoàn chỉnh mượt theo một dòng chảy cảm xúc, tự động xử lý điểm cắt, thêm nhạc nền điện ảnh theo từng phân cảnh, làm sống động âm thanh theo hành động/thoại và xuất phụ đề Tiếng Việt, Anh, Anh Mỹ, Nhật, Hàn, Tây Ban Nha, Úc, Canada cùng các nước thu nhập cao.</p>
+      <div class="sb-checks" style="margin:12px 0">
+        <label class="chk"><input type="checkbox" id="sbSeamlessFlow" ${e.seamless_flow !== false ? 'checked' : ''}><span>Nối mượt liên hoàn theo 1 dòng chảy (khử ngắt quãng cảm xúc giữa các cảnh)</span></label>
+        <label class="chk"><input type="checkbox" id="sbAutoFixClips" ${e.auto_fix_clips !== false ? 'checked' : ''}><span>Tự cắt ghép &amp; sửa lỗi điểm nối đầu/cuối phân cảnh</span></label>
+        <label class="chk"><input type="checkbox" id="sbCinemaAudio" ${e.cinema_audio !== false ? 'checked' : ''}><span>Âm thanh chuẩn rạp ngoài đời thực: sống động theo hành động &amp; rõ lời thoại nhân vật</span></label>
+      </div>
+      ${eligible.length
+        ? `<div class="sb-edit-list">${ordered.map((c, i) => {
+            const trim = e.clips.find((s) => String(s.scene_id) === String(c.scene_id));
+            return `<div class="sb-edit-row" data-sb-edit-scene="${esc(c.scene_id)}">
+              <b>${i + 1}</b>
+              <label class="chk"><input type="checkbox" data-edit-enabled ${trim ? 'checked' : ''}><span>Cảnh ${c.order ?? ((B.detail.scenes || []).findIndex((s) => String(s.id) === String(c.scene_id)) + 1)} · ${c.duration != null ? Number(c.duration).toFixed(1) + ' giây' : 'đã có clip'}${c.shorter_than_target ? ' · ngắn hơn 15 giây' : ''}</span></label>
+              <label>Bắt đầu (giây)<input class="input" type="number" min="0" step="0.1" data-edit-in value="${trim?.trim_in ?? 0}"></label>
+              <label>Kết thúc (giây)<input class="input" type="number" min="0" step="0.1" data-edit-out value="${trim?.trim_out ?? (c.duration != null ? Math.min(15, c.duration) : '')}" placeholder="Hết clip"></label>
+              <div class="sb-actions">
+                <button type="button" class="icon-btn" data-sb-move="-1" aria-label="Đưa cảnh lên">${ic('chevron-up')}</button>
+                <button type="button" class="icon-btn" data-sb-move="1" aria-label="Đưa cảnh xuống">${ic('chevron-down')}</button>
+              </div>
+            </div>`;
+          }).join('')}</div>`
+        : '<div class="sb-alert" style="margin-top:12px">Chưa có clip hoàn thành. Tạo clip trước để sắp xếp và dựng bộ phim hoàn chỉnh.</div>'}
+      <div class="sb-post-settings">
+        <div>
+          <h4>Phụ đề Đa Ngôn Ngữ (VN, Anh, Mỹ, Nhật, Hàn, TBN, Úc, Canada &amp; Các Nước Thu Nhập Cao)</h4>
+          <label class="field">
+            <span>Ngôn ngữ phụ đề chèn vào phim &amp; đang chỉnh sửa (${trackCount} bản SRT sẵn sàng)</span>
+            <select class="input select" id="sbSubtitleLang">
+              <option value="">Không chèn phụ đề vào hình</option>
+              ${opt((view.languages || []).length ? view.languages.map((l) => [l.code, l.label]) : LANGS, e.subtitle_lang)}
+            </select>
+          </label>
+          <div class="sb-actions" style="margin:10px 0">
+            <button type="button" class="btn primary-alt xs" id="sbAutoSubtitles">${ic('sparkles')}Tự tạo bộ phụ đề đa ngôn ngữ theo thoại phân cảnh</button>
+            <button type="button" class="btn ghost xs" id="sbImportSrt">${ic('upload')}Nhập file .srt</button>
+            <input type="file" id="sbSrtFile" accept=".srt,text/plain" hidden>
+          </div>
+          <label class="field">
+            <span>Nội dung SRT theo thời gian bộ phim tổng</span>
+            <textarea class="input" id="sbSrtText" rows="7" placeholder="1&#10;00:00:00,000 --> 00:00:03,000&#10;Nội dung phụ đề…">${esc(e.subtitles_srt || '')}</textarea>
+          </label>
+          <p class="hint">Hỗ trợ tự tạo phụ đề khớp mốc từng phân cảnh cho Tiếng Việt, Anh, Anh Mỹ, Nhật, Hàn, Tây Ban Nha, Úc, Canada và các nước thu nhập cao, hoặc nhập/dán phụ đề SRT đã dịch riêng (không tự dịch máy ngầm khi bạn nhập tay).</p>
+        </div>
+        <div>
+          <h4>Nhạc nền Điện Ảnh &amp; Âm thanh Rạp Chiếu Phim</h4>
+          <label class="field">
+            <span>Chế độ nhạc nền theo phân cảnh</span>
+            <select class="input select" id="sbMusicMode">
+              ${opt([
+                ['auto_cinematic', 'Tự tạo & phối nhạc nền điện ảnh biến thiên theo từng phân cảnh (Chuẩn rạp)'],
+                ['upload', 'Dùng file nhạc tải lên + Phối âm sống động chuẩn rạp'],
+                ['none', 'Không thêm nhạc nền (Chỉ giữ âm thanh hành động & thoại gốc)'],
+              ], e.music_mode || 'auto_cinematic')}
+            </select>
+          </label>
+          <div class="sb-actions" style="margin-top:10px">
+            <label class="btn ghost xs">${ic('music')}Tải file nhạc riêng<input type="file" id="sbMusicFile" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,audio/*" hidden></label>
+            <button type="button" class="btn ghost xs" id="sbRemoveMusic">Dùng nhạc điện ảnh tự động</button>
+          </div>
+          <p class="hint" id="sbMusicName">${esc(B.music?.name || e.music_name || e.music_file?.split(/[\\/]/).pop() || 'Nhạc nền điện ảnh tự động biến thiên mượt theo cảm xúc từng phân cảnh')}</p>
+          <label class="field"><span>Âm lượng nhạc nền · <b id="sbMusicVolumeLabel">${Math.round(e.music_volume * 100)}%</b></span><input type="range" id="sbMusicVolume" min="0" max="1" step="0.01" value="${e.music_volume}"></label>
+          <label class="field"><span>Âm lượng thoại &amp; hành động nhân vật · <b id="sbDialogueVolumeLabel">${Math.round(e.dialogue_volume * 100)}%</b></span><input type="range" id="sbDialogueVolume" min="0" max="2" step="0.01" value="${e.dialogue_volume}"></label>
+          <p class="hint">Hệ thống cân bằng động (Cinema Mastering) giúp lời thoại và tiếng động hành động nổi bật, nhạc nền ôm theo dòng chảy của phim mà không lấn át giọng nhân vật.</p>
+        </div>
+      </div>
+      <div class="sb-actions" style="margin-top:17px">
+        <button type="button" class="btn primary-alt" id="sbRender" ${!eligible.length || rendering ? 'disabled' : ''}>${ic('film')}${rendering ? 'Đang dựng bộ phim hoàn chỉnh…' : 'Nối Cảnh, Phối Nhạc Rạp & Xuất Bộ Phim Hoàn Chỉnh'}</button>
+        <button type="button" class="btn ghost" id="sbSaveEdit" ${rendering ? 'disabled' : ''}>${ic('check')}Lưu chỉnh sửa</button>
+        ${rendering ? '<button type="button" class="btn ghost" id="sbCancelRender">Dừng dựng</button>' : ''}
+      </div>
+      ${render.status ? `<div class="sb-final-output"><p class="hint">${esc(phase(render.status))}${render.progress != null ? ' · ' + Math.round((Number(render.progress) || 0) * 100) + '%' : ''}</p>${render.error ? `<p class="rf-error">${esc(render.error)}</p>` : ''}${render.url ? `<video src="${esc(render.url)}" controls preload="metadata"></video><a class="btn primary-alt sm" href="${esc(render.url)}" download>${ic('download')}Tải bộ phim hoàn chỉnh</a>` : ''}${(render.srt_files || []).map((f) => `<a class="btn ghost xs" href="${esc(typeof f === 'string' ? fileUrl(f) : f.url || fileUrl(f.file || f.path))}" download>${ic('download')}SRT ${esc(f.lang || f.language || '')}</a>`).join('')}</div>` : ''}`;
+  }
+
+  async function loadEdit(keep = false) {
+    if (!B.current) return;
+    try {
+      const view = await api('GET', `/api/scene-batches/${B.current}/edit`);
+      if (!keep || !B.editDirty) hydrateEdit(view);
+      else B.editView = view;
+      const el = $id('sbPostEditor');
+      if (el && !el.contains(document.activeElement) && ![...el.querySelectorAll('video')].some((v) => !v.paused)) {
+        el.innerHTML = postHtml();
+      }
+    } catch (e) {
+      if ($id('sbPostEditor')) $id('sbPostEditor').innerHTML = `<p class="rf-error">${esc(e.message)}</p>`;
+    }
+  }
+
+  async function autoGenerateSubtitles() {
+    if (B.busy || !B.current) return;
+    B.edit = currentEdit();
+    B.busy = true;
+    try {
+      const view = await api('POST', `/api/scene-batches/${B.current}/subtitles/auto`, { edit: B.edit });
+      hydrateEdit(view);
+      if ($id('sbPostEditor')) $id('sbPostEditor').innerHTML = postHtml();
+      toast('Đã tạo bộ phụ đề đa ngôn ngữ (VN, Anh, Mỹ, Nhật, Hàn, TBN, Úc, Canada & các nước thu nhập cao) khớp mạch phân cảnh.', 'success');
+    } catch (e) {
+      notify(e);
+    } finally {
+      B.busy = false;
+    }
+  }
+
+  async function saveEdit(render = false) {
+    if (B.busy || !B.current) return;
+    B.edit = currentEdit();
+    B.busy = true;
+    try {
+      const view = await api('POST', `/api/scene-batches/${B.current}/${render ? 'render' : 'edit'}`, B.edit);
+      if (render) {
+        toast('Đã bắt đầu nối các phân cảnh, phối nhạc rạp và xuất bộ phim hoàn chỉnh.', 'success');
+        await loadEdit(false);
+      } else {
+        hydrateEdit(view);
+        $id('sbPostEditor').innerHTML = postHtml();
+        toast('Đã lưu cài đặt dựng phim và phụ đề.', 'success');
+      }
+    } catch (e) {
+      notify(e);
+    } finally {
+      B.busy = false;
+    }
+  }
+
+  async function refresh(quiet = false) {
+    if (B.loading) return;
+    B.loading = true;
+    try {
+      const data = await api('GET', '/api/scene-batches');
+      B.projects = data.projects || [];
+      B.capacity = data.capacity || null;
+      B.error = '';
+      refreshDraftCapacity();
+      list();
+      if (!B.creating && B.current) {
+        const requested = B.current;
+        const d = await api('GET', `/api/scene-batches/${requested}`);
+        if (String(requested) !== String(B.current)) return;
+        B.detail = d;
+        const main = $id('sbMain');
+        const editing = main.contains(document.activeElement) && document.activeElement.matches('input,textarea,select');
+        const playing = [...main.querySelectorAll('video')].some((v) => !v.paused);
+        if (!quiet || (!editing && !playing)) {
+          if (B.edit) B.edit = currentEdit();
+          detailView();
+          await loadEdit(quiet);
+        }
+      } else if (!$id('sbTitle')) {
+        createView();
+      }
+    } catch (e) {
+      B.error = e.message;
+      list();
+      if (!quiet) notify(e);
+      if (!$id('sbMain').children.length) {
+        $id('sbMain').innerHTML = `<div class="card"><h2>Chưa tải được phân cảnh</h2><p class="hint">${esc(e.message)}</p><button type="button" class="btn ghost" data-sb-refresh>Thử lại</button></div>`;
+      }
+    } finally {
+      B.loading = false;
+    }
+  }
+
+  function schedule() {
+    clearTimeout(B.timer);
+    B.timer = setTimeout(async () => {
+      if (!active()) return;
+      await refresh(true);
+      schedule();
+    }, 5000);
+  }
+
+  async function open() {
+    shell();
+    if (B.current && !B.detail) B.creating = false;
+    await refresh();
+    schedule();
+  }
+
+  async function selectProject(id) {
+    if (B.creating) saveDraft();
+    B.current = id;
+    B.creating = false;
+    B.edit = null;
+    B.editView = null;
+    B.editDirty = false;
+    B.music = null;
+    store.set('sceneBatchCurrent', id);
+    await refresh();
+  }
+
+  function newProject() {
+    if (B.busy) return;
+    if (B.creating) saveDraft();
+    B.current = null;
+    B.detail = null;
+    B.edit = null;
+    B.editView = null;
+    B.editDirty = false;
+    B.creating = true;
+    store.set('sceneBatchCurrent', null);
+    list();
+    createView();
+  }
+
+  async function action(name, scene_ids) {
+    if (B.busy || !B.current) return;
+    B.busy = true;
+    try {
+      await api('POST', `/api/scene-batches/${B.current}/${name}`, scene_ids ? { scene_ids } : {});
+      await refresh();
+    } catch (e) {
+      notify(e);
+    } finally {
+      B.busy = false;
+    }
+  }
+
+  root.addEventListener('input', (event) => {
+    const el = event.target;
+    if (B.creating) {
+      if (el.dataset.sbRefLabel != null) B.draft.reference_images[Number(el.dataset.sbRefLabel)].label = el.value;
+      if (el.matches('input,textarea,select')) saveDraft();
+    } else {
+      if (el.id === 'sbSubtitleLang') return;
+      rememberEdit();
+      if (el.id === 'sbMusicVolume') $id('sbMusicVolumeLabel').textContent = Math.round(el.value * 100) + '%';
+      if (el.id === 'sbDialogueVolume') $id('sbDialogueVolumeLabel').textContent = Math.round(el.value * 100) + '%';
+    }
+  });
+
+  root.addEventListener('change', async (event) => {
+    const el = event.target;
+    if (el.id === 'sbRefFiles') {
+      await addRefs(el.files);
+      el.value = '';
+      return;
+    }
+    if (el.id === 'sbStoryboardBatchFiles') {
+      await addSceneStoryboards(el.files, null);
+      el.value = '';
+      return;
+    }
+    if (el.id === 'sbSingleSceneStoryboardFile') {
+      await addSceneStoryboards(el.files, B.targetSceneUploadIndex ?? 0);
+      el.value = '';
+      return;
+    }
+    if (el.id === 'sbSceneCountSelect') {
+      const n = Number(el.value);
+      if ($id('sbSceneCount')) $id('sbSceneCount').value = String(n);
+      resizeScenesTo(n);
+      return;
+    }
+    if (el.dataset.sceneSbSelect != null) {
+      saveDraft();
+      const idx = Number(el.dataset.sceneSbSelect);
+      const chosenFile = el.value;
+      const refObj = B.draft.reference_images.find((r) => r.file === chosenFile);
+      if (B.draft.scenes[idx]) {
+        B.draft.scenes[idx].storyboard_file = chosenFile;
+        B.draft.scenes[idx].storyboard_name = refObj?.name || chosenFile;
+        B.draft.scenes[idx].storyboard_url = refObj ? refUrl(refObj) : '';
+      }
+      store.set('sceneBatchDraft', B.draft);
+      createView();
+      return;
+    }
+    if (el.id === 'sbScenesFile' && el.files[0]) {
+      try {
+        if (el.files[0].size > 1024 * 1024) throw new Error('File câu lệnh tối đa 1 MB.');
+        importLines(await svReadFile(el.files[0]));
+      } catch (e) {
+        notify(e);
+      }
+      return;
+    }
+    if (el.dataset.sbRefRole != null) {
+      B.draft.reference_images[Number(el.dataset.sbRefRole)].role = el.value;
+      saveDraft();
+    }
+    if (el.id === 'sbSrtFile' && el.files[0]) {
+      try {
+        if (el.files[0].size > 2 * 1024 * 1024) throw new Error('File SRT tối đa 2 MB.');
+        $id('sbSrtText').value = await svReadFile(el.files[0]);
+        rememberEdit();
+      } catch (e) {
+        notify(e);
+      }
+      el.value = '';
+      return;
+    }
+    if (el.id === 'sbSubtitleLang') {
+      const previous = B.edit?.subtitle_lang || '';
+      const oldSrt = B.edit?.subtitles_srt || '';
+      B.edit.subtitle_tracks = B.edit.subtitle_tracks || {};
+      if (previous) B.edit.subtitle_tracks[previous] = { srt: oldSrt };
+      B.edit.subtitle_lang = el.value;
+      $id('sbSrtText').value = B.edit.subtitle_tracks[el.value]?.srt || '';
+      rememberEdit();
+      return;
+    }
+    if (el.id === 'sbMusicFile' && el.files[0]) {
+      const f = el.files[0];
+      try {
+        if (f.size > 100 * 1024 * 1024) throw new Error('File nhạc tối đa 100 MB.');
+        B.edit = currentEdit();
+        const result = await api('POST', `/api/scene-batches/${B.current}/music?name=${encodeURIComponent(f.name)}`, undefined, f);
+        B.music = result;
+        B.edit.music_file = result.file;
+        B.edit.music_name = result.name || f.name;
+        B.edit.music_mode = 'upload';
+        if ($id('sbMusicMode')) $id('sbMusicMode').value = 'upload';
+        B.editDirty = true;
+        $id('sbMusicName').textContent = result.name || f.name;
+        toast('Đã tải nhạc nền cho bước dựng bộ phim tổng.', 'success');
+      } catch (e) {
+        notify(e);
+      }
+      el.value = '';
+      return;
+    }
+    if (B.creating && el.matches('input,textarea,select')) saveDraft();
+    else if (!B.creating) rememberEdit();
+  });
+
+  root.addEventListener('click', async (event) => {
+    const el = event.target;
+    const project = el.closest('[data-sb-project]');
+    if (project) { selectProject(project.dataset.sbProject); return; }
+    if (el.closest('[data-sb-new]')) { newProject(); return; }
+    if (el.closest('[data-sb-refresh]')) { refresh(); return; }
+    if (el.closest('#sbStart')) { submit(true); return; }
+    if (el.closest('#sbSave')) { submit(false); return; }
+    if (el.closest('[data-sb-start]')) { action('start'); return; }
+    if (el.closest('[data-sb-retry]')) { action('retry'); return; }
+    if (el.closest('[data-sb-stop]')) { action('stop'); return; }
+    const retry = el.closest('[data-sb-retry-scene]');
+    if (retry) { action('retry', [retry.dataset.sbRetryScene]); return; }
+    if (el.closest('#sbImportScenes')) { $id('sbScenesFile').click(); return; }
+    if (el.closest('#sbPasteScenes')) { pasteDialog(); return; }
+    if (el.closest('#sbUploadStoryboards')) { $id('sbStoryboardBatchFiles')?.click(); return; }
+    if (el.closest('#sbAutoContinuity')) { autoLinkContinuity(); return; }
+    const pickSceneImg = el.closest('[data-sb-pick-scene-image]');
+    if (pickSceneImg) {
+      B.targetSceneUploadIndex = Number(pickSceneImg.dataset.sbPickSceneImage);
+      $id('sbSingleSceneStoryboardFile')?.click();
+      return;
+    }
+    const clearSceneImg = el.closest('[data-sb-clear-scene-image]');
+    if (clearSceneImg) {
+      saveDraft();
+      const idx = Number(clearSceneImg.dataset.sbClearSceneImage);
+      if (B.draft.scenes[idx]) {
+        B.draft.scenes[idx].storyboard_file = '';
+        B.draft.scenes[idx].storyboard_name = '';
+        B.draft.scenes[idx].storyboard_url = '';
+      }
+      store.set('sceneBatchDraft', B.draft);
+      createView();
+      return;
+    }
+    const presetBtn = el.closest('[data-sb-preset-count]');
+    if (presetBtn) {
+      const n = Number(presetBtn.dataset.sbPresetCount);
+      resizeScenesTo(n);
+      return;
+    }
+    if (el.closest('#sbAddCharacter')) {
+      saveDraft();
+      if (B.draft.characters.length >= 20) return toast('Tối đa 20 hồ sơ nhân vật.', 'warn');
+      const idx = B.draft.characters.length + 1;
+      B.draft.characters.push({
+        id: 'character_' + Math.random().toString(36).slice(2, 9),
+        name: 'Nhân vật ' + idx,
+        description: 'Giữ đồng nhất 100% khuôn mặt, kiểu tóc và trang phục theo ảnh tham chiếu ở mọi phân cảnh.',
+        voice: 'Giọng tự nhiên, rõ chữ, cảm xúc sống động theo thoại và hành động; giữ cố định xuyên suốt các phân cảnh.',
+        reference_file: B.draft.reference_images[0]?.file || '',
+      });
+      createView();
+      return;
+    }
+    const removeChar = el.closest('[data-sb-remove-character]');
+    if (removeChar) {
+      saveDraft();
+      const id = removeChar.dataset.sbRemoveCharacter;
+      B.draft.characters = B.draft.characters.filter((c) => c.id !== id);
+      B.draft.scenes.forEach((s) => { s.character_ids = s.character_ids.filter((c) => c !== id); });
+      store.set('sceneBatchDraft', B.draft);
+      createView();
+      return;
+    }
+    const removeRef = el.closest('[data-sb-remove-ref]');
+    if (removeRef) {
+      saveDraft();
+      const removed = B.draft.reference_images.splice(Number(removeRef.dataset.sbRemoveRef), 1)[0];
+      B.draft.characters.forEach((c) => { if (c.reference_file === removed.file) c.reference_file = ''; });
+      store.set('sceneBatchDraft', B.draft);
+      createView();
+      return;
+    }
+    if (el.closest('#sbResizeScenes')) {
+      saveDraft();
+      const n = Number($id('sbSceneCount').value);
+      if (!Number.isInteger(n) || n < MIN_SCENES || n > MAX_SCENES) {
+        return toast(`Chọn từ ${MIN_SCENES} đến ${MAX_SCENES} phân cảnh.`, 'warn');
+      }
+      if (n < B.draft.scenes.length && B.draft.scenes.slice(n).some((s) => s.prompt)) {
+        if (!await confirmDialog(`Bỏ ${B.draft.scenes.length - n} ô phân cảnh cuối cùng?`, { title: 'Giảm số phân cảnh', ok: 'Bỏ các ô cuối' })) return;
+      }
+      resizeScenesTo(n);
+      return;
+    }
+    if (el.closest('[data-sb-jump-edit]')) { $id('sbPostCard')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+    if (el.closest('#sbAutoSubtitles')) { autoGenerateSubtitles(); return; }
+    if (el.closest('#sbImportSrt')) { $id('sbSrtFile').click(); return; }
+    if (el.closest('#sbRemoveMusic')) {
+      rememberEdit();
+      B.edit.music_file = '';
+      B.edit.music_name = '';
+      B.edit.music_mode = 'auto_cinematic';
+      if ($id('sbMusicMode')) $id('sbMusicMode').value = 'auto_cinematic';
+      B.music = null;
+      $id('sbMusicName').textContent = 'Nhạc nền điện ảnh tự động biến thiên mượt theo cảm xúc từng phân cảnh';
+      return;
+    }
+    if (el.closest('#sbCancelRender')) {
+      try {
+        await api('POST', `/api/scene-batches/${B.current}/render/cancel`, {});
+        await loadEdit(true);
+      } catch (e) {
+        notify(e);
+      }
+      return;
+    }
+    if (el.closest('#sbSaveEdit')) { saveEdit(false); return; }
+    if (el.closest('#sbRender')) { saveEdit(true); return; }
+    const move = el.closest('[data-sb-move]');
+    if (move) {
+      rememberEdit();
+      const row = move.closest('[data-sb-edit-scene]');
+      const other = Number(move.dataset.sbMove) < 0 ? row.previousElementSibling : row.nextElementSibling;
+      if (other) {
+        if (Number(move.dataset.sbMove) < 0) row.parentNode.insertBefore(row, other);
+        else row.parentNode.insertBefore(other, row);
+        rememberEdit();
+        [...root.querySelectorAll('.sb-edit-row')].forEach((r, i) => { r.querySelector('b').textContent = i + 1; });
+      }
+      return;
+    }
+  });
+
+  window.addEventListener('beforeunload', () => { if (B.creating && $id('sbTitle')) saveDraft(); });
+  window.SceneBatch = { open, refresh };
+  const oldOpen = window.ReferenceFilm.open;
+  function setMode(mode, load = true) {
+    window.ReferenceWorkspaceMode = mode === 'film' ? 'film' : 'scenes';
+    store.set('referenceWorkspaceMode', window.ReferenceWorkspaceMode);
+    $id('referenceFilmWorkspace').hidden = window.ReferenceWorkspaceMode !== 'film';
+    root.hidden = window.ReferenceWorkspaceMode !== 'scenes';
+    for (const id of ['rfRefresh', 'rfNew']) $id(id).hidden = window.ReferenceWorkspaceMode === 'scenes';
+    page.querySelectorAll('[data-reference-workspace]').forEach((b) => {
+      const on = b.dataset.referenceWorkspace === window.ReferenceWorkspaceMode;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', String(on));
+    });
+    if (load) {
+      if (window.ReferenceWorkspaceMode === 'scenes') open();
+      else oldOpen();
+    }
+  }
+  page.querySelectorAll('[data-reference-workspace]').forEach((b) => b.addEventListener('click', () => {
+    if (B.creating && $id('sbTitle')) saveDraft();
+    setMode(b.dataset.referenceWorkspace);
+  }));
+  window.ReferenceFilm.open = async () => {
+    setMode(store.get('referenceWorkspaceMode', 'scenes'), false);
+    if (window.ReferenceWorkspaceMode === 'scenes') await open();
+    else await oldOpen();
+  };
+  setMode(store.get('referenceWorkspaceMode', 'scenes'), false);
+})();
